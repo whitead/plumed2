@@ -270,6 +270,9 @@ private:
   double work_;
   bool isFirstStep;
   long int last_step_warn_grid;
+
+  std::string edm_readfilename_;
+  Grid *EDMTarget_;
   
   void   readGaussians(IFile*);
   bool   readChunkOfGaussians(IFile *ifile, unsigned n);
@@ -329,6 +332,31 @@ void MetaD::registerKeywords(Keywords& keys){
   keys.add("optional","SIGMA_MIN","the lower bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
   keys.addFlag("WALKERS_MPI",false,"Switch on MPI version of multiple walkers - not compatible with other WALKERS_* options");
   keys.addFlag("ACCELERATION",false,"Set to TRUE if you want to compute the metadynamics acceleration factor.");  
+  keys.add("optional", "EDM_RFILE", "use experiment-directed metadynamics with this file defining the desired target free energy");
+  keys.addFlag("RESTART_FROM_GRID", false, "restart the simulation, but use input grids to restart rather than the old HILLS");
+  keys.add("optional", "TEMP", "the system temperature - this is only needed if you are doing well-tempered metadynamics, transition-tempered metadynamics, acceleration, or adaptive metabasin metadynamics");
+  keys.add("optional", "TAU", "in well tempered metadynamics, sets height to (kb*DeltaT*pace*timestep)/tau");
+  keys.add("optional", "GRID_MIN", "the lower bounds for the grid");
+  keys.add("optional", "GRID_MAX", "the upper bounds for the grid");
+  keys.add("optional", "GRID_BIN", "the number of bins for the grid");
+  keys.add("optional", "GRID_SPACING", "the approximate grid spacing (to be used as an alternative or together with GRID_BIN)");
+  keys.addFlag("GRID_SPARSE", false, "use a sparse grid to store hills");
+  keys.addFlag("GRID_NOSPLINE", false, "don't use spline interpolation with grids");
+  keys.add("optional", "GRID_WSTRIDE", "write the grid to a file every N steps");
+  keys.add("optional", "GRID_WFILE", "the file on which to write the grid");
+  keys.addFlag("STORE_GRIDS", false, "store all the grid files the calculation generates. They will be deleted if this keyword is not present");
+  keys.add("optional", "ADAPTIVE", "use a geometric (=GEOM) or diffusion (=DIFF) based hills width scheme. Sigma is one number that has distance units or timestep dimensions");
+  keys.add("optional", "WALKERS_ID", "walker id");
+  keys.add("optional", "WALKERS_N", "number of walkers");
+  keys.add("optional", "WALKERS_DIR", "shared directory with the hills files from all the walkers");
+  keys.add("optional", "WALKERS_RSTRIDE", "stride for reading hills files");
+  keys.add("optional", "INTERVAL", "monodimensional lower and upper limits, outside the limits the system will not feel the biasing force.");
+  keys.add("optional", "GRID_RFILE", "a grid file from which the bias should be read at the initial step of the simulation");
+  keys.add("optional", "SIGMA_MAX", "the upper bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
+  keys.add("optional", "SIGMA_MIN", "the lower bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
+  keys.addFlag("WALKERS_MPI", false, "Switch on MPI version of multiple walkers - not compatible with other WALKERS_* options");
+  keys.addFlag("ACCELERATION", false, "Set to TRUE if you want to compute the metadynamics acceleration factor.");
+  keys.addFlag("CALC_AVERAGE_BIAS", false, "Set to TRUE if you want to compute the metadynamics average bias, c(t).");
   keys.use("RESTART");
   keys.use("UPDATE_FROM");
   keys.use("UPDATE_UNTIL");
@@ -337,6 +365,9 @@ void MetaD::registerKeywords(Keywords& keys){
 MetaD::~MetaD(){
   if(flexbin) delete flexbin;
   if(BiasGrid_) delete BiasGrid_;
+  if (edm_readfilename_.size() > 0) {
+    delete EDMTarget_;
+  }
   hillsOfile_.close();
   if(wgridstride_>0) gridfile_.close();
   delete [] dp_;
@@ -448,6 +479,9 @@ last_step_warn_grid(0)
     if(height0_!=std::numeric_limits<double>::max()) error("At most one between HEIGHT and TAU should be specified");
     height0_=(kbt_*(biasf_-1.0))/tau*getTimeStep()*stride_;
   }
+
+  //experiment directed metaD stuff
+  parse("EDM_RFILE", edm_readfilename_);
   
   // Grid Stuff
   vector<std::string> gmin(getNumberOfArguments());
@@ -535,6 +569,12 @@ last_step_warn_grid(0)
     if(getNumberOfArguments()!=1) error("INTERVAL limits correction works only for monodimensional metadynamics!");
     if(uppI_<lowI_) error("The Upper limit must be greater than the Lower limit!");
     doInt_=true;
+
+  }
+
+  // Experiment-directed metadynamics
+  if (edm_readfilename_.length() > 0) {
+    log.printf("  Reading a target distribution from grid in file %s \n", edm_readfilename_.c_str());
   }
 
   acceleration=false;
@@ -664,6 +704,26 @@ last_step_warn_grid(0)
     if(i==mw_id_) ifiles[i]->close();
    }
   }
+
+  // Initialize and read a target experimental free energy (log distribution) if requested.
+  if (edm_readfilename_.length() > 0) {
+    IFile edm_file;
+    edm_file.open(edm_readfilename_);
+    std::string funcl = getLabel() + ".target";
+    EDMTarget_ = Grid::create(funcl, getArguments(), edm_file, false, false, false);
+    edm_file.close();
+    // Check for consistency between the target and the MetaD input specs.
+    if (EDMTarget_->getDimension() != getNumberOfArguments()) {
+      error("mismatch between dimensionality of input grid and number of arguments");
+    }
+    for (unsigned i = 0; i < getNumberOfArguments(); ++i) {
+      if (getPntrToArgument(i)->isPeriodic() != EDMTarget_->getIsPeriodic()[i]) {
+        error("periodicity mismatch between arguments and input bias");
+      }
+    }
+  }
+  
+
 
 // open hills file for writing
   hillsOfile_.link(*this);
@@ -881,15 +941,15 @@ vector<unsigned> MetaD::getGaussianSupport(const Gaussian& hill)
 	  	nneigh.push_back( static_cast<unsigned>(ceil(cutoff/BiasGrid_->getDx()[i])) );
         }
  }else{
-	 for(unsigned i=0;i<getNumberOfArguments();++i){
-	  double cutoff=sqrt(2.0*DP2CUTOFF)*hill.sigma[i];
-	  nneigh.push_back( static_cast<unsigned>(ceil(cutoff/BiasGrid_->getDx()[i])) );
- 	}
+   for(unsigned i=0;i<getNumberOfArguments();++i){
+     double cutoff=sqrt(2.0*DP2CUTOFF)*hill.sigma[i];
+     nneigh.push_back( static_cast<unsigned>(ceil(cutoff/BiasGrid_->getDx()[i])) );
+   }
  }
-	//log<<"------- END GET GAUSSIAN SUPPORT --------\n"; 
+ //log<<"------- END GET GAUSSIAN SUPPORT --------\n"; 
  return nneigh;
 }
-
+  
 double MetaD::getBiasAndDerivatives(const vector<double>& cv, double* der)
 {
  double bias=0.0;
@@ -1012,7 +1072,13 @@ double MetaD::getHeight(const vector<double>& cv)
  if(welltemp_){
     double vbias=getBiasAndDerivatives(cv);
     height=height0_*exp(-vbias/(kbt_*(biasf_-1.0)));
- } 
+ }
+
+ if (edm_readfilename_.size() > 0) {
+   height = min(height0_, height * exp(EDMTarget_->getValue(cv) / kbt_));
+ }
+ 
+ 
  return height;
 }
 
