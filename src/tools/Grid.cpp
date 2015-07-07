@@ -586,20 +586,27 @@ void Grid::writeCubeFile(OFile& ofile){
   }
 }
 
-Grid* Grid::create(const std::string& funcl, std::vector<Value*> args, IFile& ifile, 
-                   const vector<std::string> & gmin,const vector<std::string> & gmax, 
-                   const vector<unsigned> & nbin,bool dosparse, bool dospline, bool doder){
-  Grid* grid=Grid::create(funcl,args,ifile,dosparse,dospline,doder);
-  std::vector<unsigned> cbin( grid->getNbin() );
-  std::vector<std::string> cmin( grid->getMin() ), cmax( grid->getMax() );
-  for(unsigned i=0;i<args.size();++i){
-      plumed_massert( cmin[i]==gmin[i], "mismatched grid min" );
-      plumed_massert( cmax[i]==gmax[i], "mismatched grid max" );
-      if( args[i]->isPeriodic() ){
-        plumed_massert( cbin[i]==nbin[i], "mismatched grid nbins" );
-      } else {
-        plumed_massert( (cbin[i]-1)==nbin[i], "mismatched grid nbins");
-      }
+Grid* Grid::create(const std::string &funcl, std::vector<Value*> args, IFile &ifile,
+                   const vector<std::string> &gmin, const vector<std::string> &gmax,
+                   const vector<unsigned> &nbin, bool dosparse, bool dospline, bool doder) {
+  double tmp_check, tmp_ref;
+  
+  Grid* grid = Grid::create(funcl, args, ifile, dosparse, dospline, doder);
+  
+  std::vector<unsigned> cbin(grid->getNbin());
+  std::vector<std::string> cmin(grid->getMin()), cmax(grid->getMax());
+  for (unsigned i = 0; i < args.size(); ++i) {
+    Tools::convert(cmin[i], tmp_check);
+    Tools::convert(gmin[i], tmp_ref);
+    plumed_massert(Tools::compare_float(tmp_ref, tmp_check), "mismatched grid min");
+    Tools::convert(cmax[i], tmp_check);
+    Tools::convert(gmax[i], tmp_ref);
+    plumed_massert(Tools::compare_float(tmp_ref, tmp_check), "mismatched grid max");
+    if (args[i]->isPeriodic()) {
+      plumed_massert(cbin[i] == nbin[i], "mismatched grid nbins");
+    } else {
+      plumed_massert((cbin[i] - 1) == nbin[i], "mismatched grid nbins");
+    }
   }
   return grid;
 }
@@ -608,6 +615,7 @@ Grid* Grid::create(const std::string& funcl, std::vector<Value*> args, IFile& if
 {
  Grid* grid=NULL;
  unsigned nvar=args.size(); bool hasder=false; std::string pstring;
+ double tmp_check, tmp_ref;
  std::vector<int> gbin1(nvar); std::vector<unsigned> gbin(nvar); 
  std::vector<std::string> labels(nvar),gmin(nvar),gmax(nvar);
  std::vector<std::string> fieldnames; ifile.scanFieldList( fieldnames );
@@ -625,7 +633,12 @@ Grid* Grid::create(const std::string& funcl, std::vector<Value*> args, IFile& if
          plumed_massert( pstring=="true", "input value is periodic but grid is not");
          std::string pmin, pmax;
          args[i]->getDomain( pmin, pmax ); gbin[i]=gbin1[i];
-         if( pmin!=gmin[i] || pmax!=gmax[i] ) plumed_merror("mismatch between grid boundaries and periods of values");
+	 Tools::convert(pmin, tmp_check);
+	 Tools::convert(gmin[i], tmp_ref);
+	 plumed_massert(Tools::compare_float(tmp_ref, tmp_check), "mismatched between grid boundary min and period min");
+	 Tools::convert(pmax, tmp_check);
+	 Tools::convert(gmax[i], tmp_ref);
+	 plumed_massert(Tools::compare_float(tmp_ref, tmp_check), "mismatched between grid boundary max and period max");	 
      } else {
          gbin[i]=gbin1[i]-1;  // Note header in grid file indicates one more bin that there should be when data is not periodic
          plumed_massert( pstring=="false", "input value is not periodic but grid is");
