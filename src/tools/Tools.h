@@ -121,6 +121,10 @@ public:
   static std::string extension(const std::string&);
 /// Fast int power
   static double fastpow(double base,int exp);
+/// Although generally a bad idea, sometimes comparing floats is necessary
+/// This is intended for checking file headers and nothing else
+/// Returns true if they are the same to 1 part per million relative to reference
+  static bool compare_float(double reference, double check);
 };
 
 template <class T>

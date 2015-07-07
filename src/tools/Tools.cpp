@@ -306,4 +306,8 @@ std::string Tools::extension(const std::string&s){
   return ext;
 }
 
+  bool Tools::compare_float(double reference, double check) {
+    return fabs( (check - reference) / reference) < 0.000001;
+  }
+
 }
