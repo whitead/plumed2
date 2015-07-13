@@ -690,11 +690,6 @@ MetaD::MetaD(const ActionOptions &ao):
   }
 
   parse("EDM_RFILE", edm_readfilename_);
-  if (edm_readfilename_.size() > 0) {
-    if (kbt_ == 0.0) {
-      error("Unless the MD engine passes the temperature to plumed, with experiment-directed metad you must specify it using TEMP");
-    }
-  }
 
   // Check for a benthic metadynamics toleration threshold.
   // Wait to set the energy threshold until the hill height is parsed.
@@ -1931,7 +1926,7 @@ double MetaD::getHeight(const vector<double> &cv) {
     }
   }
   if (edm_readfilename_.size() > 0) {
-    height = min(height0_, height * exp(EDMTarget_->getValue(cv) / kbt_));
+    height = min(height0_, height * exp(EDMTarget_->getValue(cv)));
   }
   if (benthic_toleration_) {
     if (BenthicHistogram_->getValue(BiasGrid_->getIndex(cv)) < benthic_tol_number_) {
