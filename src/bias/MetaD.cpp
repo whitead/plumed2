@@ -270,6 +270,9 @@ private:
   double work_;
   bool isFirstStep;
   long int last_step_warn_grid;
+ 
+  bool calc_average_bias_coft_;
+  double average_bias_coft_;  
 
   bool globallytempered_;
   double gt_biasf_;
@@ -307,7 +310,8 @@ void MetaD::registerKeywords(Keywords& keys){
   keys.addOutputComponent("bias","default","the instantaneous value of the bias potential");
   keys.addOutputComponent("work","default","accumulator for work");
   keys.addOutputComponent("acc","ACCELERATION","the metadynamics acceleration factor");
-  keys.use("ARG");
+  keys.addOutputComponent("coft", "CALC_AVERAGE_BIAS", "the metadynamics average bias c(t)");
+  keys.use("ARG");  
   keys.add("compulsory","SIGMA","the widths of the Gaussian hills");
   keys.add("compulsory","PACE","the frequency for hill addition");
   keys.add("compulsory","FILE","HILLS","a file in which the list of added hills is stored");
@@ -403,9 +407,8 @@ uppI_(-1), lowI_(-1), doInt_(false),
 work_(0.0),
 isFirstStep(true),
 last_step_warn_grid(0),
-globallytempered_(false),
-gt_biasf_(1.0),
-gt_biasthreshold_(0.0),
+globallytempered_(false), gt_biasf_(1.0), gt_biasthreshold_(0.0),
+calc_average_bias_coft_(false), average_bias_coft_(0.0)
 {
   // parse the flexible hills
   string adaptiveoption;
@@ -615,6 +618,9 @@ gt_biasthreshold_(0.0),
   acceleration=false;
   parseFlag("ACCELERATION",acceleration);
 
+  // Set to calculate the average bias.
+  parseFlag("CALC_AVERAGE_BIAS", calc_average_bias_coft_);
+
   checkRead();
 
   log.printf("  Gaussian width ");
@@ -666,6 +672,18 @@ gt_biasthreshold_(0.0),
     if(!welltemp_) error("The calculation of the acceleration works only if Well-Tempered Metadynamics is on"); 
     log.printf("  calculation on the fly of the acceleration factor");
     addComponent("acc"); componentIsNotPeriodic("acc");
+  }
+
+  if (calc_average_bias_coft_) {
+    if (kbt_ == 0.0) {
+      error("The calculation of the average bias on the fly works only if simulation temperature has been defined");
+    }
+    if (!grid_) {
+      error("Calculating the average bias on the fly works only with a grid");
+    }
+    log.printf("  calculation on the fly of the average bias c(t)\n");
+    addComponent("coft");
+    componentIsNotPeriodic("coft");
   }
 
 // for performance
@@ -799,6 +817,9 @@ gt_biasthreshold_(0.0),
      "Pratyush and Parrinello, Phys. Rev. Lett. 111, 230602 (2013)");
   if(concurrent) log<<plumed.cite(
      "Gil-Ley and Bussi, J. Chem. Theory Comput. 11, 1077 (2015)");
+
+  if (calc_average_bias_coft_) log << plumed.cite(
+     "Pratyush and Parrinello, J. Phys. Chem. B 119, 736–742 (2015)");
  
   log<<"\n";
 
@@ -1144,6 +1165,8 @@ void MetaD::calculate()
     getPntrToComponent("acc")->set(mean_acc);
   }
   getPntrToComponent("work")->set(work_);
+  // Set the average bias
+  getPntrToComponent("coft")->set(average_bias_coft_); 
 // set Forces 
   for(unsigned i=0;i<ncv;++i){
    const double f=-der[i];
@@ -1272,7 +1295,27 @@ void MetaD::update(){
      ifiles[i]->reset(false);
     }
    }
- } 
+ }
+ // Calculate the new average bias after adding the new hill.
+ if (calc_average_bias_coft_ && (nowAddAHill || (mw_n_ > 1 && getStep() % mw_rstride_ == 0))) {
+   double exp_free_energy_sum = 0.0;
+   double exp_biased_free_energy_sum = 0.0;
+   if (biasf_ > 1.0) {
+     for (unsigned i; i < BiasGrid_->getSize(); i++) {
+       double pt_bias = BiasGrid_->getValue(i);
+       exp_free_energy_sum += exp(biasf_ * pt_bias / (kbt_  * (biasf_ - 1)));
+       exp_biased_free_energy_sum += exp(pt_bias / (kbt_ * (biasf_ - 1)));
+     }
+   } else if (biasf_ == 1.0) {
+     for (unsigned i; i < BiasGrid_->getSize(); i++) {
+       double pt_bias = BiasGrid_->getValue(i);
+       exp_free_energy_sum += exp(pt_bias / kbt_);
+       exp_biased_free_energy_sum += 1.0;
+     }
+   }
+   average_bias_coft_ = kbt_ * ( std::log(exp_free_energy_sum) - std::log(exp_biased_free_energy_sum));
+   getPntrToComponent("coft")->set(average_bias_coft_);
+ }
 }
 
 void MetaD::finiteDifferenceGaussian
