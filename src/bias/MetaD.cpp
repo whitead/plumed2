@@ -271,6 +271,10 @@ private:
   bool isFirstStep;
   long int last_step_warn_grid;
 
+  bool globallytempered_;
+  double gt_biasf_;
+  double gt_biasthreshold_;
+
   std::string edm_readfilename_;
   Grid *EDMTarget_;
   
@@ -333,6 +337,8 @@ void MetaD::registerKeywords(Keywords& keys){
   keys.addFlag("WALKERS_MPI",false,"Switch on MPI version of multiple walkers - not compatible with other WALKERS_* options");
   keys.addFlag("ACCELERATION",false,"Set to TRUE if you want to compute the metadynamics acceleration factor.");  
   keys.add("optional", "EDM_RFILE", "use experiment-directed metadynamics with this file defining the desired target free energy");
+  keys.add("optional", "GTBIASFACTOR", "use globally tempered metadynamics and use this biasfactor.  Please note you must also specify temp");
+  keys.add("optional", "GTBIASTHRESHOLD", "use globally tempered metadynamics with this bias threshold.  Please note you must also specify GTBIASFACTOR");
   keys.addFlag("RESTART_FROM_GRID", false, "restart the simulation, but use input grids to restart rather than the old HILLS");
   keys.add("optional", "TEMP", "the system temperature - this is only needed if you are doing well-tempered metadynamics, transition-tempered metadynamics, acceleration, or adaptive metabasin metadynamics");
   keys.add("optional", "TAU", "in well tempered metadynamics, sets height to (kb*DeltaT*pace*timestep)/tau");
@@ -396,7 +402,10 @@ acceleration(false), acc(0.0),
 uppI_(-1), lowI_(-1), doInt_(false),
 work_(0.0),
 isFirstStep(true),
-last_step_warn_grid(0)
+last_step_warn_grid(0),
+globallytempered_(false),
+gt_biasf_(1.0),
+gt_biasthreshold_(0.0),
 {
   // parse the flexible hills
   string adaptiveoption;
@@ -480,7 +489,22 @@ last_step_warn_grid(0)
     height0_=(kbt_*(biasf_-1.0))/tau*getTimeStep()*stride_;
   }
 
-  //experiment directed metaD stuff
+  parse("GTBIASFACTOR", gt_biasf_);
+  if (gt_biasf_ < 1.0) {
+    error("Bias factors must be greater than 1");
+  }
+  if (gt_biasf_ > 1.0) {
+    if (kbt_ == 0.0) {
+      error("Unless the MD engine passes the temperature to plumed, with globally-tempered metad you must specify it using TEMP");
+    }
+    globallytempered_ = true;
+    parse("GTBIASTHRESHOLD", gt_biasthreshold_);
+    if (gt_biasthreshold_ < 0.0) {
+      error("well tempered bias threshold must be positive");
+    }
+  }
+
+  //experiment directed metaD input file
   parse("EDM_RFILE", edm_readfilename_);
   
   // Grid Stuff
@@ -570,6 +594,17 @@ last_step_warn_grid(0)
     if(uppI_<lowI_) error("The Upper limit must be greater than the Lower limit!");
     doInt_=true;
 
+  }
+
+  // Globally tempered metadynamics options
+  if (globallytempered_) {
+    log.printf("  Globally-Tempered bias factor %f\n", gt_biasf_);
+    log.printf("  Globally-Tempered bias threshold %f\n", gt_biasthreshold_);
+    log.printf("  KbT %f\n", kbt_);
+    // Check that the average bias is being calculated.
+    if (!calc_average_bias_coft_) {
+      error(" global tempering requires calculation of the average bias");
+    }
   }
 
   // Experiment-directed metadynamics
@@ -1074,6 +1109,11 @@ double MetaD::getHeight(const vector<double>& cv)
     height=height0_*exp(-vbias/(kbt_*(biasf_-1.0)));
  }
 
+ //globally tempered and thresholded
+ if (globallytempered_) {
+   height *= exp(-max(0.0, average_bias_coft_ - gt_biasthreshold_) / (kbt_ * (gt_biasf_ - 1.0)));
+ }
+ 
  if (edm_readfilename_.size() > 0) {
    height = min(height0_, height * exp(EDMTarget_->getValue(cv)));
  }
