@@ -1075,7 +1075,7 @@ double MetaD::getHeight(const vector<double>& cv)
  }
 
  if (edm_readfilename_.size() > 0) {
-   height = min(height0_, height * exp(EDMTarget_->getValue(cv) / kbt_));
+   height = min(height0_, height * exp(EDMTarget_->getValue(cv)));
  }
  
  
