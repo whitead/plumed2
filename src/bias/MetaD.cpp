@@ -820,6 +820,14 @@ calc_average_bias_coft_(false), average_bias_coft_(0.0)
 
   if (calc_average_bias_coft_) log << plumed.cite(
      "Pratyush and Parrinello, J. Phys. Chem. B 119, 736–742 (2015)");
+
+  if(gt_biasthreshold_ > 0.0) log << plumed.cite(
+    "Dama, Rotskoff, Parrinello,  J. Chem. Theory. Comput., 10(9), 3626-3633 (2014)");
+  if(globallytempered_) log << plumed.cite(
+    "Dama, Parrinello, Voth, Phys. Rev. Lett. 112, 24062, (2014)");
+
+  if(edm_readfilename_.size() > 0) log << plumed.cite(
+    "White, Dama, Voth, J. Chem. Theory. Comput., 11 (6), 2451-2460 (2015)");
  
   log<<"\n";
 
