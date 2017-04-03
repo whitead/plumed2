@@ -13,6 +13,7 @@
 !/multicolvar
 !/secondarystructure
 !/trajectories
+!/virial
 !/scripts
 !/manyrestraints
 !/molfile_plugin
