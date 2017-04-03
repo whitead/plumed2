@@ -108,7 +108,7 @@ linkcells(comm)
   }
 
   //make neighbors big enough for all neighbors case
-  neighs.resize(max(group_1.size(), group_2.size()));
+  neighs.resize(group_1.size() + group_2.size());
 			      
   // And check everything has been read in correctly
   checkRead();
