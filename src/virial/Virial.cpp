@@ -5,6 +5,7 @@
 #include "tools/LinkCells.h"
 #include "tools/AtomNumber.h"
 #include "tools/Grid.h"
+#include "tools/KernelFunctions.h"
 
 //for MPI communicator
 #include "core/PlumedMain.h"
@@ -53,15 +54,18 @@ private:
   vector<unsigned int> neighs;
   //Neighbor list linkscells to accelerate
   LinkCells linkcells;
+  OFile rdffile_;
 
 
-  Grid* bias_grid_;
+  Grid* rdf_grid_;
+  KernelFunctions* kernel_;
 
   void setupLinkCells();  
 
 public:
   static void registerKeywords( Keywords& keys );
   explicit Virial(const ActionOptions&);
+  ~Virial();
 // active methods:
   virtual void calculate();
   virtual void prepare();
@@ -76,6 +80,7 @@ void Virial::registerKeywords( Keywords& keys ){
   keys.add("compulsory", "RDF_MIN", "The maximum distance to consider for pairwise calculations");
   keys.add("compulsory", "RDF_MAX", "The maximum distance to consider for pairwise calculations");
   keys.add("compulsory", "RDF_NBINS", "The maximum distance to consider for pairwise calculations");
+  keys.add("compulsory", "RDF_BW", "The maximum distance to consider for pairwise calculations");
   keys.addFlag("RDF_SPLINE", true, "The maximum distance to consider for pairwise calculations");
 
   //  keys.reset_style("ATOMS","atoms");
@@ -93,7 +98,7 @@ PLUMED_COLVAR_INIT(ao),
 b_self_virial(false),
 neighs(0),
 linkcells(comm),
-bias_grid_(NULL)
+rdf_grid_(NULL)
 {
   //used for link list
   double cutoff;
@@ -104,11 +109,13 @@ bias_grid_(NULL)
 
   string funcl = getLabel() + ".rdf";
   vector<string> gmin, gmax;
+  vector<double> center, bw;
   vector<unsigned int> nbin;
   bool b_spline;
   parseVector("RDF_MIN", gmin);
-  parseVector("RDF_MAX", gmin);
+  parseVector("RDF_MAX", gmax);
   parseVector("RDF_NBINS", nbin);
+  parseVector("RDF_BW", bw);
   parseFlag("RDF_SPLINE", b_spline);
 
   vector<string> gnames;
@@ -121,7 +128,9 @@ bias_grid_(NULL)
   //if it is periodic. Since it's not, I'll just 
   //pass some string vectors I have laying around
   //to satisfy the constructor.
-  bias_grid_ = new Grid(funcl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
+  rdf_grid_ = new Grid(funcl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
+  center.push_back(0);
+  kernel_ = new KernelFunctions( center, bw, "truncated-gaussian", false, 1.0, true ); 
 
   parseAtomList("GROUP", all_atoms[0]);
   parseAtomList("GROUPA", all_atoms[1]);
@@ -152,9 +161,21 @@ bias_grid_(NULL)
   addValueWithDerivatives();
   setNotPeriodic();
 
+
+  rdffile_.link(*this);
+  rdffile_.open("rdf.dat");
+
 }
 
+  Virial::~Virial(){
 
+    if(rdf_grid_)
+      free(rdf_grid_);
+    if(kernel_)
+      free(kernel_);
+       
+    
+  }
 
   void Virial::prepare() {
     requestAtoms(group_1);
@@ -190,6 +211,8 @@ void Virial::calculate()  {
   unsigned int nn;
   Vector rij;
   double r;
+  vector<double> rvec;
+  rvec.push_back(0);
   for(unsigned int i = 0; i < group_1.size(); ++i) {
 
     nn = 1;
@@ -200,6 +223,9 @@ void Virial::calculate()  {
 	continue;
       rij = delta(getPosition(group_1[i]), getPosition(group_2[neighs[j]]));
       r = rij.modulo();
+      rvec[0] = r;
+      kernel_->moveCenter(rvec);
+      rdf_grid_->addKernel(*kernel_);
       //do thing tiwht r
       log.printf("pairwise = %f\n", r);
     }
@@ -207,7 +233,8 @@ void Virial::calculate()  {
 
   //get pairs 
   setValue(0);
-
+  rdffile_.rewind();
+  rdf_grid_->writeToFile(rdffile_);
 }
 
 
