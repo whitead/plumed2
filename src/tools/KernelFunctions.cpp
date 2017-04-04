@@ -73,7 +73,7 @@ The following variants are available.
 </tr>
 </table>
 
-In the above \f$H(y)\f$ is a function that is equal to one when \f$y>0\f$ and zero when \f$y \le 0\f$. \f$n\f$ is
+nIn the above \f$H(y)\f$ is a function that is equal to one when \f$y>0\f$ and zero when \f$y \le 0\f$. \f$n\f$ is
 the dimensionality of the vector \f$\mathbf{x}\f$ and \f$V\f$ is the volume of an elipse in an \f$n\f$ dimensional
 space which is given by:
 
@@ -177,6 +177,12 @@ void KernelFunctions::setData( const std::vector<double>& at, const std::vector<
     height=w;
   }
 }
+
+  void KernelFunctions::moveCenter(const std::vector<double>& new_center) {
+    plumed_assert( center.size() == new_center.size());
+    for(unsigned int i; i < center.size(); ++i)
+      center[i] = new_center[i];
+  }
 
 double KernelFunctions::getCutoff( const double& width ) const {
   const double DP2CUTOFF=6.25;

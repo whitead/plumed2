@@ -52,6 +52,9 @@ public:
   unsigned ndim() const;
 /// Get the cutoff for a kernel
   double getCutoff( const double& width ) const ;
+/// Move the center to reuse
+  void moveCenter(const std::vector<double>& center);
+  
 /// Get the position of the center 
   std::vector<double> getCenter() const;
 /// Get the support
