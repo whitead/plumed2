@@ -178,12 +178,6 @@ void KernelFunctions::setData( const std::vector<double>& at, const std::vector<
   }
 }
 
-  void KernelFunctions::moveCenter(const std::vector<double>& new_center) {
-    plumed_assert( center.size() == new_center.size());
-    for(unsigned int i; i < center.size(); ++i)
-      center[i] = new_center[i];
-  }
-
 double KernelFunctions::getCutoff( const double& width ) const {
   const double DP2CUTOFF=6.25;
   if( ktype==gaussian ) return sqrt(2.0*DP2CUTOFF)*width;

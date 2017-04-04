@@ -5,7 +5,6 @@
 #include "tools/LinkCells.h"
 #include "tools/AtomNumber.h"
 #include "tools/Grid.h"
-#include "tools/KernelFunctions.h"
 
 //for MPI communicator
 #include "core/PlumedMain.h"
@@ -47,6 +46,9 @@ class Virial : public Colvar {
 private:
   //if we are computing self-virial
   bool b_self_virial;
+  double rdf_bw_;
+
+  vector<unsigned int> rdf_kernel_support_;
   //atoms
   vector<AtomNumber> group_1;
   vector<AtomNumber> group_2;
@@ -58,9 +60,10 @@ private:
 
 
   Grid* rdf_grid_;
-  KernelFunctions* kernel_;
 
-  void setupLinkCells();  
+
+  void setup_link_cells_();
+  double eval_kernel_(const double x, const double r, double* der);
 
 public:
   static void registerKeywords( Keywords& keys );
@@ -96,6 +99,7 @@ void Virial::registerKeywords( Keywords& keys ){
 Virial::Virial(const ActionOptions&ao):
 PLUMED_COLVAR_INIT(ao),
 b_self_virial(false),
+rdf_kernel_support_(1),
 neighs(0),
 linkcells(comm),
 rdf_grid_(NULL)
@@ -109,13 +113,12 @@ rdf_grid_(NULL)
 
   string funcl = getLabel() + ".rdf";
   vector<string> gmin, gmax;
-  vector<double> center, bw;
   vector<unsigned int> nbin;
   bool b_spline;
   parseVector("RDF_MIN", gmin);
   parseVector("RDF_MAX", gmax);
   parseVector("RDF_NBINS", nbin);
-  parseVector("RDF_BW", bw);
+  parse("RDF_BW", rdf_bw_);
   parseFlag("RDF_SPLINE", b_spline);
 
   vector<string> gnames;
@@ -129,8 +132,9 @@ rdf_grid_(NULL)
   //pass some string vectors I have laying around
   //to satisfy the constructor.
   rdf_grid_ = new Grid(funcl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
-  center.push_back(0);
-  kernel_ = new KernelFunctions( center, bw, "truncated-gaussian", false, 1.0, true ); 
+
+  rdf_kernel_support_.push_back(ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
+  
 
   parseAtomList("GROUP", all_atoms[0]);
   parseAtomList("GROUPA", all_atoms[1]);
@@ -171,8 +175,6 @@ rdf_grid_(NULL)
 
     if(rdf_grid_)
       free(rdf_grid_);
-    if(kernel_)
-      free(kernel_);
        
     
   }
@@ -182,7 +184,7 @@ rdf_grid_(NULL)
     requestAtoms(group_2);
   }
   
-void Virial::setupLinkCells(){
+void Virial::setup_link_cells_(){
   std::vector<Vector> ltmp_pos( group_1.size() + group_2.size() * b_self_virial ); 
   std::vector<unsigned> ltmp_ind( group_1.size() + group_2.size() * b_self_virial ); 
 
@@ -202,17 +204,28 @@ void Virial::setupLinkCells(){
   linkcells.buildCellLists( ltmp_pos, ltmp_ind, getPbc() );
 }
 
-
+double Virial::eval_kernel_(const double x, const double r, double* der) {
+    der[0] = 0.75 * 2 * (x - r);
+    return 0.75 * (1 - (x - r) * (x - r) / rdf_bw_ / rdf_bw_ );
+  }
 
 void Virial::calculate()  {
-  setupLinkCells();
+  setup_link_cells_();
 
   //number of neighbors
   unsigned int nn;
   Vector rij;
-  double r;
-  vector<double> rvec;
-  rvec.push_back(0);
+  double r, v, dx;
+  Grid::index_t ineigh;
+  vector<double> rvec(1);
+  vector<Grid::index_t> grid_neighs;
+  vector<double> grid_der(1);
+  vector<double> x(1);
+
+
+  double count = 0;
+  dx = rdf_grid_->getDx()[0];
+  
   for(unsigned int i = 0; i < group_1.size(); ++i) {
 
     nn = 1;
@@ -224,16 +237,26 @@ void Virial::calculate()  {
       rij = delta(getPosition(group_1[i]), getPosition(group_2[neighs[j]]));
       r = rij.modulo();
       rvec[0] = r;
-      kernel_->moveCenter(rvec);
-      rdf_grid_->addKernel(*kernel_);
+      
+      grid_neighs = rdf_grid_->getNeighbors(rvec, rdf_kernel_support_);
+      for(unsigned k = 0; k < grid_neighs.size();++k){
+        ineigh = grid_neighs[k];
+        rdf_grid_->getPoint(ineigh,x);
+        v = eval_kernel_(x[0], r, &grid_der[0]);
+	//rescale them by local volume
+	v /= 4 * 3.14159254 * r * r * dx;
+        rdf_grid_->addValueAndDerivatives(ineigh, v, grid_der);
+      }
+      count++;
       //do thing tiwht r
       log.printf("pairwise = %f\n", r);
     }
   }
 
-  //get pairs 
   setValue(0);
+  
   rdffile_.rewind();
+  rdf_grid_->scaleAllValuesAndDerivatives(1 / count);
   rdf_grid_->writeToFile(rdffile_);
 }
 
