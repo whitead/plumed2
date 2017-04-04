@@ -4,6 +4,7 @@
 #include "tools/Pbc.h"
 #include "tools/LinkCells.h"
 #include "tools/AtomNumber.h"
+#include "tools/Grid.h"
 
 //for MPI communicator
 #include "core/PlumedMain.h"
@@ -45,13 +46,16 @@ class Virial : public Colvar {
 private:
   //if we are computing self-virial
   bool b_self_virial;
-  //Neighbor list linkscells to accelerate
-  LinkCells linkcells;
   //atoms
   vector<AtomNumber> group_1;
   vector<AtomNumber> group_2;
   //used to store neighboring atoms
   vector<unsigned int> neighs;
+  //Neighbor list linkscells to accelerate
+  LinkCells linkcells;
+
+
+  Grid* bias_grid_;
 
   void setupLinkCells();  
 
@@ -69,6 +73,10 @@ void Virial::registerKeywords( Keywords& keys ){
   Colvar::registerKeywords(keys);
 
   keys.add("compulsory", "CUTOFF", "The maximum distance to consider for pairwise calculations");
+  keys.add("compulsory", "RDF_MIN", "The maximum distance to consider for pairwise calculations");
+  keys.add("compulsory", "RDF_MAX", "The maximum distance to consider for pairwise calculations");
+  keys.add("compulsory", "RDF_NBINS", "The maximum distance to consider for pairwise calculations");
+  keys.addFlag("RDF_SPLINE", true, "The maximum distance to consider for pairwise calculations");
 
   //  keys.reset_style("ATOMS","atoms");
   keys.add("atoms-1","GROUP","Calculate the distance between each distinct pair of atoms in the group");
@@ -76,13 +84,16 @@ void Virial::registerKeywords( Keywords& keys ){
                               "the atoms in GROUPB. This must be used in conjuction with GROUPB.");
   keys.add("atoms-2","GROUPB","Calculate the distances between all the atoms in GROUPA and all the atoms "
                               "in GROUPB. This must be used in conjuction with GROUPA.");
+  
+  
 }
 
 Virial::Virial(const ActionOptions&ao):
 PLUMED_COLVAR_INIT(ao),
 b_self_virial(false),
 neighs(0),
-linkcells(comm)
+linkcells(comm),
+bias_grid_(NULL)
 {
   //used for link list
   double cutoff;
@@ -90,6 +101,28 @@ linkcells(comm)
   vector< vector<AtomNumber> > all_atoms(3);
 
   parse("CUTOFF", cutoff);
+
+  string funcl = getLabel() + ".rdf";
+  vector<string> gmin, gmax;
+  vector<unsigned int> nbin;
+  bool b_spline;
+  parseVector("RDF_MIN", gmin);
+  parseVector("RDF_MAX", gmin);
+  parseVector("RDF_NBINS", nbin);
+  parseFlag("RDF_SPLINE", b_spline);
+
+  vector<string> gnames;
+  vector<bool> gpbc;
+  gnames.push_back("virial_rdf");
+  gpbc.push_back(false);
+
+  //grid wants to have some kind of 
+  //string to look up the periodic domain
+  //if it is periodic. Since it's not, I'll just 
+  //pass some string vectors I have laying around
+  //to satisfy the constructor.
+  bias_grid_ = new Grid(funcl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
+
   parseAtomList("GROUP", all_atoms[0]);
   parseAtomList("GROUPA", all_atoms[1]);
   parseAtomList("GROUPB", all_atoms[2]);
