@@ -48,6 +48,7 @@ private:
   bool b_self_virial;
   double rdf_bw_;
   double cutoff_;
+
   double kbt_;
   unsigned int pair_count_;
 
@@ -161,7 +162,8 @@ virial_grid_(NULL)
   drdf_grid_ = new Grid(dfuncl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
   virial_grid_ = new Grid(ffuncl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
 
-  rdf_kernel_support_.push_back(ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
+  //rdf_kernel_support_.push_back(ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
+  rdf_kernel_support_.push_back(4 * ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
   
 
   parseAtomList("GROUP", all_atoms[0]);
@@ -240,7 +242,8 @@ void Virial::setup_link_cells_(){
   linkcells.buildCellLists( ltmp_pos, ltmp_ind, getPbc() );
 }
 
-  double Virial::eval_rdf_(const double x,
+
+  /*double Virial::eval_rdf_(const double x,
 			   const double r,
 			   const double scale,
 			   vector<double>& der,
@@ -250,15 +253,29 @@ void Virial::setup_link_cells_(){
     der[0] = 2*A*pow(pow(rdf_bw_, 2) - pow(r - x, 2), 2)*(-pow(rdf_bw_, 2) - 3*r*(r - x) + pow(r - x, 2))/(pow(rdf_bw_, 6)*pow(r, 3));
     der2[0] = 6*A*(pow(rdf_bw_, 2) - pow(r - x, 2))*(pow(r, 2)*(-pow(rdf_bw_, 2) + 5*pow(r - x, 2)) + 4*r*(pow(rdf_bw_, 2) - pow(r - x, 2))*(r - x) + pow(pow(rdf_bw_, 2) - pow(r - x, 2), 2))/(pow(rdf_bw_, 6)*pow(r, 4));
     return A*pow(1 - pow(-r + x, 2)/pow(rdf_bw_, 2), 3)/pow(r, 2);
-  }
+    }
+  */
 
+    double Virial::eval_rdf_(const double x,
+			   const double r,
+			   const double scale,
+			   vector<double>& der,
+    			   vector<double>& der2) const {
+      const double A = 1. / (4 * pi * scale) / sqrt(2 * pi) / rdf_bw_;
+      const double u = (x - r) * (x - r) / rdf_bw_ / rdf_bw_;
+      const double g = A * exp(-u / 2) / r/ r;
+      der[0] = g * (r - x) / rdf_bw_ / rdf_bw_;
+      der2[0] = g  * (u - 1) / rdf_bw_ / rdf_bw_;
+      return g;
+    }
+  
   double Virial::eval_virial_(const double r,
 			     const double rdf,
 			     const double drdf,
 			     const double d2rdf,
 			     double* force) const {
-    
-    *force = kbt_ / r * (d2rdf / rdf - drdf*drdf / rdf / rdf - drdf / r / rdf);
+
+    *force = (kbt_ / r * (d2rdf / rdf - drdf*drdf / rdf / rdf - drdf / r / rdf));
     return kbt_ / rdf * drdf;
   }
     
