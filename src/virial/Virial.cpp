@@ -304,13 +304,13 @@ void Virial::setup_link_cells_(){
     			   vector<double>& der2) const {
       //A contains (1) the guassian denominator (2) local volume
       //pairwise density has (3) per-particle averaging prefactor and (4) density
-      //double A = 1. / (4 * pi * r * r * scale * sqrt(2 * pi)* rdf_bw_ * pairwise_density_);
-      double A = 1. / (4 * pi * r * r * scale * pairwise_density_);
+      // (5) scale factor for disc grid (which cancles with local vol)
+      double A = 1. / (4 * pi * r * r * sqrt(2 * pi)* rdf_bw_ * pairwise_density_);
       double u = (x - r) * (x - r);
       if(rdf_bw_ == 0)
 	A = 1 / (4 * pi * r * r * scale * pairwise_density_);
       else
-	u /= rdf_bw_ / rdf_bw_;
+	u /= rdf_bw_ * rdf_bw_;
       const double g = A * exp(-u / 2);
       der[0] = g * (r - x) / rdf_bw_ / rdf_bw_;
       der2[0] = g  * (u - 1) / rdf_bw_ / rdf_bw_;
