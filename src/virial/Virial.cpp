@@ -48,9 +48,12 @@ private:
   bool b_self_virial;
   double rdf_bw_;
   double cutoff_;
+  double smoothing_;
+  double pairwise_density_;
 
   double kbt_;
   unsigned int pair_count_;
+  unsigned int rdf_samples_;
 
   vector<unsigned int> rdf_kernel_support_;
   //atoms
@@ -103,6 +106,8 @@ void Virial::registerKeywords( Keywords& keys ){
   keys.add("compulsory", "RDF_NBINS", "The maximum distance to consider for pairwise calculations");
   keys.add("compulsory", "RDF_BW", "The maximum distance to consider for pairwise calculations");
   keys.add("optional", "TEMPERATURE", "The maximum distance to consider for pairwise calculations");
+  keys.add("optional", "AVG_TIME_CONST", "The maximum distance to consider for pairwise calculations");
+  keys.add("optional", "VOLUME", "The maximum distance to consider for pairwise calculations");
   keys.addFlag("RDF_SPLINE", true, "The maximum distance to consider for pairwise calculations");
 
   //  keys.reset_style("ATOMS","atoms");
@@ -119,7 +124,7 @@ Virial::Virial(const ActionOptions&ao):
 PLUMED_COLVAR_INIT(ao),
 b_self_virial(false),
 kbt_(1),
-pair_count_(0),
+rdf_samples_(0),
 neighs(0),
 linkcells(comm),
 rdf_grid_(NULL),
@@ -129,6 +134,8 @@ virial_grid_(NULL)
   // Read in the atoms
   vector< vector<AtomNumber> > all_atoms(3);
   double T = 0;
+  double time_const = 1;
+  double vol = 0;
 
   parse("CUTOFF", cutoff_);
 
@@ -143,10 +150,20 @@ virial_grid_(NULL)
   parseVector("RDF_NBINS", nbin);
   parse("RDF_BW", rdf_bw_);
   parse("TEMPERATURE", T);
+  parse("AVG_TIME_CONST", time_const);
+  parse("VOLUME", vol);
   parseFlag("RDF_SPLINE", b_spline);
 
   if(T>=0.0) kbt_=plumed.getAtoms().getKBoltzmann()*T;
   else kbt_ = plumed.getAtoms().getKbT();
+
+  log.printf("  kBT taken to be %4.2f", kbt_);
+
+  if(time_const == 0) {
+    time_const = 1;
+  }
+  smoothing_ = 1.0 - exp(-1.0 / time_const);
+  log.printf("  Using exponential moving average with time constant %4.2f (smoothing = %4.2f)\n", time_const, smoothing_);
 
   vector<string> gnames;
   vector<bool> gpbc;
@@ -177,10 +194,12 @@ virial_grid_(NULL)
     b_self_virial = false;    
     group_1 = all_atoms[1];
     group_2 = all_atoms[2];
+    log.printf("  Computing virial between two groups\n");
   } else {
     b_self_virial = true;    
     group_1 = all_atoms[0];
     group_2 = all_atoms[0];
+    log.printf("  Computing self-virial\n");
   }
 
   //make neighbors big enough for all neighbors case
@@ -188,6 +207,22 @@ virial_grid_(NULL)
 			      
   // And check everything has been read in correctly
   checkRead();
+
+  if(vol == 0) {
+    vol = getBox().determinant();
+    if(vol == 0) {
+      log.printf("  Warning: Unable to determine box, so using cutoff for volume estimate.\n");
+      log.printf("    This will lead to an overestimation of density.\n");
+      log.printf("    Conisder setting volume (in plumed units) manually\n");
+      vol = 4. / 3 * pi * pow(cutoff_, 3);
+      log.printf("  Estimating volume as %4.2f\n", vol);    
+    }
+  }
+  //calculate pairwise density
+  //divide by 2 since we don't double count
+  pairwise_density_ = (group_1.size() * (group_2.size() - 1)) / 2.0f / vol;
+  log.printf("  Setting pairwise density to %4.2f\n", pairwise_density_);
+
 
 
   linkcells.setCutoff( cutoff_ );
@@ -261,7 +296,7 @@ void Virial::setup_link_cells_(){
 			   const double scale,
 			   vector<double>& der,
     			   vector<double>& der2) const {
-      const double A = 1. / (4 * pi * scale) / sqrt(2 * pi) / rdf_bw_;
+      const double A = 1. / (4 * pi * scale) / sqrt(2 * pi) / rdf_bw_ / pairwise_density_;
       const double u = (x - r) * (x - r) / rdf_bw_ / rdf_bw_;
       const double g = A * exp(-u / 2) / r/ r;
       der[0] = g * (r - x) / rdf_bw_ / rdf_bw_;
@@ -312,6 +347,7 @@ void Virial::calculate()  {
   vector<Grid::index_t> grid_neighs;
   vector<double> grid_der(1);
   vector<double> grid_der2(1);
+  vector<double> temp(1);
   vector<double> x(1);
 
 
@@ -323,6 +359,7 @@ void Virial::calculate()  {
     neighs[0] = i;
     linkcells.retrieveNeighboringAtoms( getPosition(group_1[i]), nn, neighs);
     for(unsigned int j = 0; j < nn; ++j) {
+      //don't double count
       if(!b_self_virial && neighs[j] < group_1.size())
 	continue;
       rij = delta(getPosition(group_1[i]), getPosition(group_2[neighs[j]]));
@@ -331,15 +368,23 @@ void Virial::calculate()  {
       
       grid_neighs = rdf_grid_->getNeighbors(rvec, rdf_kernel_support_);
       for(unsigned k = 0; k < grid_neighs.size();++k){
+	//get position of neighbor
         ineigh = grid_neighs[k];
         rdf_grid_->getPoint(ineigh,x);
+	
+	//eval the rdf and derivatives
         gr = eval_rdf_(x[0], r, dx, grid_der, grid_der2);
+
+	//add them with smoothing factor (exp moving avg)
+	gr = gr * smoothing_ + (1 - smoothing_) * rdf_grid_->getValueAndDerivatives(ineigh, temp);
+	grid_der[0] = grid_der[0] * smoothing_ + (1 - smoothing_) * temp[0];
         rdf_grid_->addValueAndDerivatives(ineigh, gr, grid_der);
+
+	drdf_grid_->getValueAndDerivatives(ineigh, temp);
+	grid_der2[0] = grid_der2[0] * smoothing_ + (1 - smoothing_) * temp[0];
 	drdf_grid_->addValueAndDerivatives(ineigh, grid_der[0], grid_der2);
       }
-      pair_count_++;
-      //do thing tiwht r
-      log.printf("pairwise = %f\n", r);
+      rdf_samples_++;
     }
   }
 
@@ -348,16 +393,10 @@ void Virial::calculate()  {
   rdf_file_.rewind();
   drdf_file_.rewind();
   virial_file_.rewind();
-  double rescale = 4. / 3 * pi * pow(cutoff_,3) / pair_count_;
-  rdf_grid_->scaleAllValuesAndDerivatives(rescale);
-  drdf_grid_->scaleAllValuesAndDerivatives(rescale);
   compute_virial_grid_();
   rdf_grid_->writeToFile(rdf_file_);
   drdf_grid_->writeToFile(drdf_file_);
   virial_grid_->writeToFile(virial_file_);
-
-  rdf_grid_->scaleAllValuesAndDerivatives(1. / rescale);
-  drdf_grid_->scaleAllValuesAndDerivatives(1. / rescale);
 
 }
 
