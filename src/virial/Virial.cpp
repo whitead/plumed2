@@ -45,7 +45,7 @@ Calculate ?
 class Virial : public Colvar {
 private:
   //if we are computing self-virial
-  bool b_self_virial;
+  bool b_self_virial_;
   double rdf_bw_;
   double cutoff_;
   double smoothing_;
@@ -104,7 +104,7 @@ void Virial::registerKeywords( Keywords& keys ){
   keys.add("compulsory", "RDF_MIN", "The maximum distance to consider for pairwise calculations");
   keys.add("compulsory", "RDF_MAX", "The maximum distance to consider for pairwise calculations");
   keys.add("compulsory", "RDF_NBINS", "The maximum distance to consider for pairwise calculations");
-  keys.add("compulsory", "RDF_BW", "The maximum distance to consider for pairwise calculations");
+  keys.add("optional", "RDF_BW", "The maximum distance to consider for pairwise calculations");
   keys.add("optional", "TEMPERATURE", "The maximum distance to consider for pairwise calculations");
   keys.add("optional", "AVG_TIME_CONST", "The maximum distance to consider for pairwise calculations");
   keys.add("optional", "VOLUME", "The maximum distance to consider for pairwise calculations");
@@ -122,7 +122,8 @@ void Virial::registerKeywords( Keywords& keys ){
 
 Virial::Virial(const ActionOptions&ao):
 PLUMED_COLVAR_INIT(ao),
-b_self_virial(false),
+b_self_virial_(false),
+rdf_bw_(0),
 kbt_(1),
 rdf_samples_(0),
 neighs(0),
@@ -159,6 +160,11 @@ virial_grid_(NULL)
 
   log.printf("  kBT taken to be %4.2f", kbt_);
 
+  if(rdf_bw_ == 0) {
+    log.printf("  Warning: Setting bandwidth to zero means no forces/virial will be calculated.\n"
+	       "  Only valid RDF will be output\n");
+  }
+
   if(time_const == 0) {
     time_const = 1;
   }
@@ -191,12 +197,12 @@ virial_grid_(NULL)
     if(all_atoms[1].size() < 2 && all_atoms[2].size() < 2) {
       error("Must specify both GROUPA and GROUPB or GROUP");
     }
-    b_self_virial = false;    
+    b_self_virial_ = false;    
     group_1 = all_atoms[1];
     group_2 = all_atoms[2];
     log.printf("  Computing virial between two groups\n");
   } else {
-    b_self_virial = true;    
+    b_self_virial_ = true;    
     group_1 = all_atoms[0];
     group_2 = all_atoms[0];
     log.printf("  Computing self-virial\n");
@@ -220,7 +226,7 @@ virial_grid_(NULL)
   }
   //calculate pairwise density
   //divide by 2 since we don't double count
-  pairwise_density_ = (group_1.size() * (group_2.size() - 1)) / 2.0f / vol;
+  pairwise_density_ = (group_1.size() * (group_2.size() - b_self_virial_)) / 2.0f / vol;
   log.printf("  Setting pairwise density to %4.2f\n", pairwise_density_);
 
 
@@ -254,18 +260,18 @@ virial_grid_(NULL)
 
   void Virial::prepare() {
     requestAtoms(group_1);
-    requestAtoms(group_2);
+    requestAtoms(group_2);    
   }
   
 void Virial::setup_link_cells_(){
-  std::vector<Vector> ltmp_pos( group_1.size() + group_2.size() * b_self_virial ); 
-  std::vector<unsigned> ltmp_ind( group_1.size() + group_2.size() * b_self_virial ); 
+  std::vector<Vector> ltmp_pos( group_1.size() + group_2.size() * !b_self_virial_ ); 
+  std::vector<unsigned> ltmp_ind( group_1.size() + group_2.size() * !b_self_virial_ ); 
 
 
   for(unsigned int i = 0; i < group_1.size(); i++) {
     ltmp_pos[i] = getPosition(group_1[i]);
     ltmp_ind[i] = i;
-  }  
+  }
   unsigned int j;
   for(unsigned int i = group_1.size(); i < ltmp_pos.size(); i++) {
     j = i - group_1.size();
@@ -296,9 +302,16 @@ void Virial::setup_link_cells_(){
 			   const double scale,
 			   vector<double>& der,
     			   vector<double>& der2) const {
-      const double A = 1. / (4 * pi * scale) / sqrt(2 * pi) / rdf_bw_ / pairwise_density_;
-      const double u = (x - r) * (x - r) / rdf_bw_ / rdf_bw_;
-      const double g = A * exp(-u / 2) / r/ r;
+      //A contains (1) the guassian denominator (2) local volume
+      //pairwise density has (3) per-particle averaging prefactor and (4) density
+      //double A = 1. / (4 * pi * r * r * scale * sqrt(2 * pi)* rdf_bw_ * pairwise_density_);
+      double A = 1. / (4 * pi * r * r * scale * pairwise_density_);
+      double u = (x - r) * (x - r);
+      if(rdf_bw_ == 0)
+	A = 1 / (4 * pi * r * r * scale * pairwise_density_);
+      else
+	u /= rdf_bw_ / rdf_bw_;
+      const double g = A * exp(-u / 2);
       der[0] = g * (r - x) / rdf_bw_ / rdf_bw_;
       der2[0] = g  * (u - 1) / rdf_bw_ / rdf_bw_;
       return g;
@@ -349,18 +362,22 @@ void Virial::calculate()  {
   vector<double> grid_der2(1);
   vector<double> temp(1);
   vector<double> x(1);
-
-
+  
   dx = rdf_grid_->getDx()[0];
+
+  rdf_grid_->scaleAllValuesAndDerivatives(1 - smoothing_);
+  drdf_grid_->scaleAllValuesAndDerivatives(1 - smoothing_);
   
   for(unsigned int i = 0; i < group_1.size(); ++i) {
 
     nn = 1;
     neighs[0] = i;
     linkcells.retrieveNeighboringAtoms( getPosition(group_1[i]), nn, neighs);
-    for(unsigned int j = 0; j < nn; ++j) {
+    //start at 1 since the first is self
+    for(unsigned int j = 1; j < nn; ++j) {
       //don't double count
-      if(!b_self_virial && neighs[j] < group_1.size())
+      if((!b_self_virial_ && neighs[j] < group_1.size()) ||
+	 (b_self_virial_ && neighs[j] < i))
 	continue;
       rij = delta(getPosition(group_1[i]), getPosition(group_2[neighs[j]]));
       r = rij.modulo();
@@ -373,21 +390,29 @@ void Virial::calculate()  {
         rdf_grid_->getPoint(ineigh,x);
 	
 	//eval the rdf and derivatives
-        gr = eval_rdf_(x[0], r, dx, grid_der, grid_der2);
+	gr = eval_rdf_(x[0], r, dx, grid_der, grid_der2);
 
 	//add them with smoothing factor (exp moving avg)
-	gr = gr * smoothing_ + (1 - smoothing_) * rdf_grid_->getValueAndDerivatives(ineigh, temp);
-	grid_der[0] = grid_der[0] * smoothing_ + (1 - smoothing_) * temp[0];
-        rdf_grid_->addValueAndDerivatives(ineigh, gr, grid_der);
+	/*
+	log.printf("(%d, %d) -> r = %4.2g, x = %4.2g, gr = %4.2g, smooth = %4.2g, existing = %4.2g, samples =%d\n",
+		   group_1[i], group_2[neighs[j]],
+		   r, x[0], gr, smoothing_,
+		   rdf_grid_->getValueAndDerivatives(ineigh, temp) / smoothing_,
+		   rdf_samples_);*/
 
-	drdf_grid_->getValueAndDerivatives(ineigh, temp);
-	grid_der2[0] = grid_der2[0] * smoothing_ + (1 - smoothing_) * temp[0];
+	//exponential moving average
+	gr *= smoothing_;
+	grid_der[0] *= smoothing_;
+	grid_der2[0] *= smoothing_;
+	
+        rdf_grid_->addValueAndDerivatives(ineigh, gr, grid_der);
 	drdf_grid_->addValueAndDerivatives(ineigh, grid_der[0], grid_der2);
       }
       rdf_samples_++;
     }
   }
 
+  rdf_samples_ = 0;
   setValue(0);
   
   rdf_file_.rewind();
@@ -403,5 +428,3 @@ void Virial::calculate()  {
 
 }
 }
-
-
