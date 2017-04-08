@@ -14,6 +14,7 @@
 
 #include <string>
 #include <cmath>
+#include <iostream>
 
 using namespace std;
 
@@ -152,7 +153,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     temperature_(0),
     kbt_(1),
     rdf_stride_(1),
-    grid_w_stride_(0),
+    grid_w_stride_(1),
     rdf_samples_(0),
     neighs(0),
     linkcells(comm),
@@ -278,6 +279,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     rdf_file_.link(*this);
     drdf_file_.link(*this);
     virial_file_.link(*this);
+
     rdf_file_.open("rdf.dat");
     drdf_file_.open("drdf.dat");
     virial_file_.open("virial.dat");
@@ -292,7 +294,9 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     }
     if(virial_grid_)
       free(virial_grid_);
-    
+    rdf_file_.close();
+    drdf_file_.close();
+    virial_file_.close();
     
   }
   
@@ -509,11 +513,11 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
   }
   
   void Virial::write_grid_() {
-    
-    rdf_file_.rewind();
-    drdf_file_.rewind();
-    virial_file_.rewind();
 
+    rdf_file_ << "#! TIME " << getTime() << "\n";
+    drdf_file_ << "#! TIME " << getTime() << "\n";
+    virial_file_ << "#! TIME " << getTime() << "\n";
+    
     rdf_grid_->writeToFile(rdf_file_);
     drdf_grid_->writeToFile(drdf_file_);
     virial_grid_->writeToFile(virial_file_);
@@ -533,8 +537,8 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
       //only changes when rdf is updated
       compute_virial_grid_();	
     }
-    //    if(getStep() % grid_w_stride_ == 0)
-    //      write_grid_();
+    if(getStep() % grid_w_stride_ == 0)
+      write_grid_();
     
   }
   
