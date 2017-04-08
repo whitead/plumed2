@@ -1,10 +1,13 @@
-#include "colvar/Colvar.h"
 #include "core/ActionRegister.h"
+#include "core/ActionWithValue.h"
 #include "core/ActionAtomistic.h"
 #include "tools/Pbc.h"
 #include "tools/LinkCells.h"
 #include "tools/AtomNumber.h"
 #include "tools/Grid.h"
+#include "tools/Vector.h"
+#include "tools/Tensor.h"
+#include "tools/Units.h"
 
 //for MPI communicator
 #include "core/PlumedMain.h"
@@ -41,254 +44,289 @@ Calculate ?
 */
 //+ENDPLUMEDOC
 
+  class Virial : public ActionAtomistic, public ActionWithValue {
+  private:
+    //if we are computing self-virial
+    bool b_self_virial_;
+    double rdf_bw_;
+    double cutoff_;
+    double smoothing_;
+    double pairwise_density_;    
+    double temperature_;
+    double kbt_;
+    double virial_scaling_;
 
-class Virial : public Colvar {
-private:
-  //if we are computing self-virial
-  bool b_self_virial_;
-  double rdf_bw_;
-  double cutoff_;
-  double smoothing_;
-  double pairwise_density_;
-
-  double kbt_;
-  unsigned int pair_count_;
-  unsigned int rdf_samples_;
-
-  vector<unsigned int> rdf_kernel_support_;
-  //atoms
-  vector<AtomNumber> group_1;
-  vector<AtomNumber> group_2;
-  //used to store neighboring atoms
-  vector<unsigned int> neighs;
-  //Neighbor list linkscells to accelerate
-  LinkCells linkcells;
-  OFile rdf_file_;
-  OFile drdf_file_;
-  OFile virial_file_;
-
-
-  Grid* rdf_grid_;
-  Grid* drdf_grid_;
-  Grid* virial_grid_;
-
-
-  void setup_link_cells_();
-  double eval_virial_(const double r,
-			     const double rdf,
-			     const double drdf,
-			     const double d2rdf,
-			      double* force) const;
-  double eval_rdf_(const double x, 
-		   const double r, 
-		   const double scale, 
-		   vector<double>& der, 
-		   vector<double>& der2) const;
-  void compute_virial_grid_() const;
-
-public:
-  static void registerKeywords( Keywords& keys );
-  explicit Virial(const ActionOptions&);
-  ~Virial();
-// active methods:
-  virtual void calculate();
-  virtual void prepare();
-};
-
+    unsigned int rdf_stride_;
+    unsigned int grid_w_stride_;
+    unsigned int rdf_samples_;
+    
+    vector<unsigned int> rdf_kernel_support_;
+    //atoms
+    vector<AtomNumber> group_1;
+    vector<AtomNumber> group_2;
+    //used to store neighboring atoms
+    vector<unsigned int> neighs;
+    //Neighbor list linkscells to accelerate
+    LinkCells linkcells;
+    OFile rdf_file_;
+    OFile drdf_file_;
+    OFile virial_file_;
+    
+    
+    Grid* rdf_grid_;
+    Grid* drdf_grid_;
+    Grid* virial_grid_;
+    
+    
+    void setup_link_cells_();
+    double eval_virial_(const double r,
+			const double rdf,
+			const double drdf,
+			const double d2rdf,
+			double* force) const;
+    double eval_rdf_(const double x, 
+		     const double r, 
+		     const double scale, 
+		     vector<double>& der, 
+		     vector<double>& der2) const;
+    void compute_virial_grid_() const;
+    
+    void write_grid_();
+    double do_calc_();
+    
+  public:
+    static void registerKeywords( Keywords& keys );
+    explicit Virial(const ActionOptions&);
+    ~Virial();
+    // active methods:
+    void calculate();
+    void prepare();
+    void apply();
+    virtual unsigned int getNumberOfDerivatives();
+  };
+  
 PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
-
-void Virial::registerKeywords( Keywords& keys ){
-  Colvar::registerKeywords(keys);
-
-  keys.add("compulsory", "CUTOFF", "The maximum distance to consider for pairwise calculations");
-  keys.add("compulsory", "RDF_MIN", "The maximum distance to consider for pairwise calculations");
-  keys.add("compulsory", "RDF_MAX", "The maximum distance to consider for pairwise calculations");
-  keys.add("compulsory", "RDF_NBINS", "The maximum distance to consider for pairwise calculations");
-  keys.add("optional", "RDF_BW", "The maximum distance to consider for pairwise calculations");
-  keys.add("optional", "TEMPERATURE", "The maximum distance to consider for pairwise calculations");
-  keys.add("optional", "AVG_TIME_CONST", "The maximum distance to consider for pairwise calculations");
-  keys.add("optional", "VOLUME", "The maximum distance to consider for pairwise calculations");
-  keys.addFlag("RDF_SPLINE", true, "The maximum distance to consider for pairwise calculations");
-
-  //  keys.reset_style("ATOMS","atoms");
-  keys.add("atoms-1","GROUP","Calculate the distance between each distinct pair of atoms in the group");
-  keys.add("atoms-2","GROUPA","Calculate the distances between all the atoms in GROUPA and all "
-                              "the atoms in GROUPB. This must be used in conjuction with GROUPB.");
-  keys.add("atoms-2","GROUPB","Calculate the distances between all the atoms in GROUPA and all the atoms "
-                              "in GROUPB. This must be used in conjuction with GROUPA.");
   
-  
-}
-
-Virial::Virial(const ActionOptions&ao):
-PLUMED_COLVAR_INIT(ao),
-b_self_virial_(false),
-rdf_bw_(0),
-kbt_(1),
-rdf_samples_(0),
-neighs(0),
-linkcells(comm),
-rdf_grid_(NULL),
-drdf_grid_(NULL),
-virial_grid_(NULL)
-{
-  // Read in the atoms
-  vector< vector<AtomNumber> > all_atoms(3);
-  double T = 0;
-  double time_const = 1;
-  double vol = 0;
-
-  parse("CUTOFF", cutoff_);
-
-  string funcl = getLabel() + ".gr";
-  string dfuncl = getLabel() + ".dgr";
-  string ffuncl = getLabel() + ".force";
-  vector<string> gmin, gmax;
-  vector<unsigned int> nbin;
-  bool b_spline;
-  parseVector("RDF_MIN", gmin);
-  parseVector("RDF_MAX", gmax);
-  parseVector("RDF_NBINS", nbin);
-  parse("RDF_BW", rdf_bw_);
-  parse("TEMPERATURE", T);
-  parse("AVG_TIME_CONST", time_const);
-  parse("VOLUME", vol);
-  parseFlag("RDF_SPLINE", b_spline);
-
-  if(T>=0.0) kbt_=plumed.getAtoms().getKBoltzmann()*T;
-  else kbt_ = plumed.getAtoms().getKbT();
-
-  log.printf("  kBT taken to be %4.2f", kbt_);
-
-  if(rdf_bw_ == 0) {
-    log.printf("  Warning: Setting bandwidth to zero means no forces/virial will be calculated.\n"
-	       "  Only valid RDF will be output\n");
+  void Virial::registerKeywords( Keywords& keys ){
+    Action::registerKeywords( keys );
+    ActionWithValue::registerKeywords( keys );
+    ActionAtomistic::registerKeywords( keys );
+    
+    keys.add("compulsory", "CUTOFF", "The maximum distance to consider for pairwise calculations");
+    keys.add("compulsory", "RDF_MIN", "The maximum grid value for the running estimate of RDF");
+    keys.add("compulsory", "RDF_MAX", "The minimum grid value for the running estimate of RDF");
+    keys.add("compulsory", "RDF_NBINS", "The number of bins to use for the running estimate of the RDF");
+    keys.add("optional", "RDF_BW", "The kernel bandwidth for running estimate of RDF");
+    keys.add("optional", "TEMPERATURE", "The temperature used for calculating Boltzmann's constant");
+    keys.add("optional", "AVG_TIME_CONST", "The exponential moving average RDF time constant. "
+	     "Corresponds to how long old RDF datapoints influence it.");
+    keys.add("optional", "VOLUME", "Used to manually specify the volume for computing number density. "
+	     "If unspecified, the simulation box volume will be used if available and failing that, "
+	     "a sphere with radius equal to CUTOFF is used." );
+    keys.add("optional", "RDF_STRIDE", "How often add to the RDF.");
+    keys.add("optional", "GRID_WRITE_STRIDE", 
+	     "How often to write the RDF, its derivative, and pairwise virial grids."
+	     "Currently their names are fixed. ");
+    keys.addFlag("RDF_SPLINE", true, "Whether or not to use spline interpolation for computing RDF estimate");
+    keys.addFlag("MEAN_FIELD", false, 
+		 "Instead of computing pairwise distances at each time step, "
+		 "replace them with the mean-field approximate radial density");
+    
+    
+    keys.add("atoms-1","GROUP","Calculate the virial between each distinct pair of atoms in the group");
+    keys.add("atoms-2","GROUPA","Calculate the virial between all the atoms in GROUPA and all "
+	     "the atoms in GROUPB. This must be used in conjuction with GROUPB.");
+    keys.add("atoms-2","GROUPB","Calculate the virial between all the atoms in GROUPA and all the atoms "
+	     "in GROUPB. This must be used in conjuction with GROUPA.");
+    
+    keys.addOutputComponent("virial", "default", "The value of the virial collective variable (can be biased)");
+    keys.addOutputComponent("pressure", "default", "The pressure computed from the virial (can be biased)");
   }
-
-  if(time_const == 0) {
-    time_const = 1;
-  }
-  smoothing_ = 1.0 - exp(-1.0 / time_const);
-  log.printf("  Using exponential moving average with time constant %4.2f (smoothing = %4.2f)\n", time_const, smoothing_);
-
-  vector<string> gnames;
-  vector<bool> gpbc;
-  gnames.push_back("virial_rdf");
-  gpbc.push_back(false);
-
-  //grid wants to have some kind of 
-  //string to look up the periodic domain
-  //if it is periodic. Since it's not, I'll just 
-  //pass some string vectors I have laying around
-  //to satisfy the constructor.
-  rdf_grid_ = new Grid(funcl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
-  drdf_grid_ = new Grid(dfuncl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
-  virial_grid_ = new Grid(ffuncl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
-
-  //rdf_kernel_support_.push_back(ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
-  rdf_kernel_support_.push_back(4 * ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
   
-
-  parseAtomList("GROUP", all_atoms[0]);
-  parseAtomList("GROUPA", all_atoms[1]);
-  parseAtomList("GROUPB", all_atoms[2]);
-  
-  if(all_atoms[0].size() < 2) {
-    if(all_atoms[1].size() < 2 && all_atoms[2].size() < 2) {
-      error("Must specify both GROUPA and GROUPB or GROUP");
+  Virial::Virial(const ActionOptions&ao):
+    Action(ao),
+    ActionAtomistic(ao),
+    ActionWithValue(ao),
+    b_self_virial_(false),
+    rdf_bw_(0),
+    temperature_(0),
+    kbt_(1),
+    rdf_stride_(1),
+    grid_w_stride_(0),
+    rdf_samples_(0),
+    neighs(0),
+    linkcells(comm),
+    rdf_grid_(NULL),
+    drdf_grid_(NULL),
+    virial_grid_(NULL)
+  {
+    // Read in the atoms
+    vector< vector<AtomNumber> > all_atoms(3);
+    double time_const = 1;
+    double vol = 0;
+    
+    parse("CUTOFF", cutoff_);
+    
+    string funcl = getLabel() + ".gr";
+    string dfuncl = getLabel() + ".dgr";
+    string ffuncl = getLabel() + ".force";
+    vector<string> gmin, gmax;
+    vector<unsigned int> nbin;
+    bool b_spline;
+    parseVector("RDF_MIN", gmin);
+    parseVector("RDF_MAX", gmax);
+    parseVector("RDF_NBINS", nbin);
+    parse("RDF_BW", rdf_bw_);
+    parse("RDF_STRIDE", rdf_stride_);
+    parse("GRID_WRITE_STRIDE", grid_w_stride_);
+    parse("TEMPERATURE", temperature_);
+    parse("AVG_TIME_CONST", time_const);
+    parse("VOLUME", vol);
+    parseFlag("RDF_SPLINE", b_spline);
+    
+    log.printf("  Will compute RDF every %d steps", rdf_stride_);
+    if(grid_w_stride_ > 0)
+      log.printf("  Will write grids every %d steps", grid_w_stride_);
+    
+    if(temperature_ >= 0) kbt_ = plumed.getAtoms().getKBoltzmann() * temperature_;
+    else kbt_ = plumed.getAtoms().getKbT();
+    
+    log.printf("  kBT taken to be %4.2f", kbt_);
+    
+    if(rdf_bw_ == 0) {
+      log.printf("  Warning: Setting bandwidth to zero means no forces/virial will be calculated.\n"
+		 "  Only valid RDF will be output\n");
     }
-    b_self_virial_ = false;    
-    group_1 = all_atoms[1];
-    group_2 = all_atoms[2];
-    log.printf("  Computing virial between two groups\n");
-  } else {
-    b_self_virial_ = true;    
-    group_1 = all_atoms[0];
-    group_2 = all_atoms[0];
-    log.printf("  Computing self-virial\n");
-  }
-
-  //make neighbors big enough for all neighbors case
-  neighs.resize(group_1.size() + group_2.size());
-			      
-  // And check everything has been read in correctly
-  checkRead();
-
-  if(vol == 0) {
-    vol = getBox().determinant();
+    
+    if(time_const == 0) {
+      time_const = 1;
+    }
+    smoothing_ = 1.0 - exp(-1.0 / time_const);
+    log.printf("  Using exponential moving average with time constant %4.2f (smoothing = %4.2f)\n", time_const, smoothing_);
+    
+    vector<string> gnames;
+    vector<bool> gpbc;
+    gnames.push_back("virial_rdf");
+    gpbc.push_back(false);
+    
+    //grid wants to have some kind of 
+    //string to look up the periodic domain
+    //if it is periodic. Since it's not, I'll just 
+    //pass some string vectors I have laying around
+    //to satisfy the constructor.
+    rdf_grid_ = new Grid(funcl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
+    drdf_grid_ = new Grid(dfuncl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
+    virial_grid_ = new Grid(ffuncl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
+    
+    //rdf_kernel_support_.push_back(ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
+    rdf_kernel_support_.push_back(4 * ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
+    
+    
+    parseAtomList("GROUP", all_atoms[0]);
+    parseAtomList("GROUPA", all_atoms[1]);
+    parseAtomList("GROUPB", all_atoms[2]);
+    
+    if(all_atoms[0].size() < 2) {
+      if(all_atoms[1].size() < 2 && all_atoms[2].size() < 2) {
+	error("Must specify both GROUPA and GROUPB or GROUP");
+      }
+      b_self_virial_ = false;    
+      group_1 = all_atoms[1];
+      group_2 = all_atoms[2];
+      log.printf("  Computing virial between two groups\n");
+    } else {
+      b_self_virial_ = true;    
+      group_1 = all_atoms[0];
+      group_2 = all_atoms[0];
+      log.printf("  Computing self-virial\n");
+    }
+    
+    //make neighbors big enough for all neighbors case
+    neighs.resize(group_1.size() + group_2.size());
+    
+    // And check everything has been read in correctly
+    checkRead();
+    
     if(vol == 0) {
-      log.printf("  Warning: Unable to determine box, so using cutoff for volume estimate.\n");
-      log.printf("    This will lead to an overestimation of density.\n");
-      log.printf("    Conisder setting volume (in plumed units) manually\n");
-      vol = 4. / 3 * pi * pow(cutoff_, 3);
-      log.printf("  Estimating volume as %4.2f\n", vol);    
+      vol = getBox().determinant();
+      if(vol == 0) {
+	log.printf("  Warning: Unable to determine box, so using cutoff for volume estimate.\n");
+	log.printf("    This will lead to an overestimation of density.\n");
+	log.printf("    Conisder setting volume (in plumed units) manually\n");
+	vol = 4. / 3 * pi * pow(cutoff_, 3);
+	log.printf("  Estimating volume as %4.2f\n", vol);    
+      }
     }
+    //calculate pairwise density
+    //divide by 2 since we don't double count
+    pairwise_density_ = (group_1.size() * (group_2.size() - b_self_virial_)) / 2.0f / vol;
+    log.printf("  Setting pairwise density to %4.2f\n", pairwise_density_);
+    
+    //compute virial scaling which is kT  /(3 V)
+    virial_scaling_ = kbt_ / (3 * vol);
+    
+    
+    
+    linkcells.setCutoff( cutoff_ );
+    
+    addComponentWithDerivatives("virial");
+    addComponentWithDerivatives("pressure");
+    componentIsNotPeriodic("virial");
+    componentIsNotPeriodic("pressure");
+    
+    
+    rdf_file_.link(*this);
+    drdf_file_.link(*this);
+    virial_file_.link(*this);
+    rdf_file_.open("rdf.dat");
+    drdf_file_.open("drdf.dat");
+    virial_file_.open("virial.dat");
+    
   }
-  //calculate pairwise density
-  //divide by 2 since we don't double count
-  pairwise_density_ = (group_1.size() * (group_2.size() - b_self_virial_)) / 2.0f / vol;
-  log.printf("  Setting pairwise density to %4.2f\n", pairwise_density_);
-
-
-
-  linkcells.setCutoff( cutoff_ );
-
-  addValueWithDerivatives();
-  setNotPeriodic();
-
-
-  rdf_file_.link(*this);
-  drdf_file_.link(*this);
-  virial_file_.link(*this);
-  rdf_file_.open("rdf.dat");
-  drdf_file_.open("drdf.dat");
-  virial_file_.open("virial.dat");
-
-}
-
+  
   Virial::~Virial(){
-
+    
     if(rdf_grid_) {
       free(rdf_grid_);
       free(drdf_grid_);
     }
     if(virial_grid_)
       free(virial_grid_);
-       
+    
     
   }
-
+  
   void Virial::prepare() {
     requestAtoms(group_1);
     requestAtoms(group_2);    
   }
   
-void Virial::setup_link_cells_(){
-  std::vector<Vector> ltmp_pos( group_1.size() + group_2.size() * !b_self_virial_ ); 
-  std::vector<unsigned> ltmp_ind( group_1.size() + group_2.size() * !b_self_virial_ ); 
-
-
-  for(unsigned int i = 0; i < group_1.size(); i++) {
-    ltmp_pos[i] = getPosition(group_1[i]);
-    ltmp_ind[i] = i;
+  void Virial::setup_link_cells_(){
+    std::vector<Vector> ltmp_pos( group_1.size() + group_2.size() * !b_self_virial_ ); 
+    std::vector<unsigned> ltmp_ind( group_1.size() + group_2.size() * !b_self_virial_ ); 
+    
+    
+    for(unsigned int i = 0; i < group_1.size(); i++) {
+      ltmp_pos[i] = getPosition(group_1[i]);
+      ltmp_ind[i] = i;
+    }
+    unsigned int j;
+    for(unsigned int i = group_1.size(); i < ltmp_pos.size(); i++) {
+      j = i - group_1.size();
+      ltmp_pos[i] = getPosition(group_2[j]);
+      ltmp_ind[i] = j;
+    }
+    
+    // Build the lists for the link cells
+    linkcells.buildCellLists( ltmp_pos, ltmp_ind, getPbc() );
   }
-  unsigned int j;
-  for(unsigned int i = group_1.size(); i < ltmp_pos.size(); i++) {
-    j = i - group_1.size();
-    ltmp_pos[i] = getPosition(group_2[j]);
-    ltmp_ind[i] = j;
-  }
-
-  // Build the lists for the link cells
-  linkcells.buildCellLists( ltmp_pos, ltmp_ind, getPbc() );
-}
-
-
+  
+  
   /*double Virial::eval_rdf_(const double x,
-			   const double r,
-			   const double scale,
-			   vector<double>& der,
-    			   vector<double>& der2) const {
+    const double r,
+    const double scale,
+    vector<double>& der,
+    vector<double>& der2) const {
     const double A = 4 * pi * 35. / 32. * scale;
     //code for these was autogenerated from a symbolic math engine
     der[0] = 2*A*pow(pow(rdf_bw_, 2) - pow(r - x, 2), 2)*(-pow(rdf_bw_, 2) - 3*r*(r - x) + pow(r - x, 2))/(pow(rdf_bw_, 6)*pow(r, 3));
@@ -296,39 +334,39 @@ void Virial::setup_link_cells_(){
     return A*pow(1 - pow(-r + x, 2)/pow(rdf_bw_, 2), 3)/pow(r, 2);
     }
   */
-
-    double Virial::eval_rdf_(const double x,
+  
+  double Virial::eval_rdf_(const double x,
 			   const double r,
 			   const double scale,
 			   vector<double>& der,
     			   vector<double>& der2) const {
-      //A contains (1) the guassian denominator (2) local volume
-      //pairwise density has (3) per-particle averaging prefactor and (4) density
-      // (5) scale factor for disc grid (which cancles with local vol)
-      double A = 1. / (4 * pi * r * r * sqrt(2 * pi)* rdf_bw_ * pairwise_density_);
-      double u = (x - r) * (x - r);
-      if(rdf_bw_ == 0)
-	A = 1 / (4 * pi * r * r * scale * pairwise_density_);
-      else
-	u /= rdf_bw_ * rdf_bw_;
-      const double g = A * exp(-u / 2);
-      der[0] = g * (r - x) / rdf_bw_ / rdf_bw_;
-      der2[0] = g  * (u - 1) / rdf_bw_ / rdf_bw_;
-      return g;
-    }
+    //A contains (1) the guassian denominator (2) local volume
+    //pairwise density (3) per-particle-origin averaging prefactor (4) density
+    // (5) scale factor for disc grid (which cancles with local vol dx term)
+    double A = 1. / (4 * pi * r * r * sqrt(2 * pi)* rdf_bw_ * pairwise_density_);
+    double u = (x - r) * (x - r);
+    if(rdf_bw_ == 0)
+      A = 1 / (4 * pi * r * r * scale * pairwise_density_);
+    else
+      u /= rdf_bw_ * rdf_bw_;
+    const double g = A * exp(-u / 2);
+    der[0] = g * (r - x) / rdf_bw_ / rdf_bw_;
+    der2[0] = g  * (u - 1) / rdf_bw_ / rdf_bw_;
+    return g;
+  }
   
   double Virial::eval_virial_(const double r,
-			     const double rdf,
-			     const double drdf,
-			     const double d2rdf,
-			     double* force) const {
-
-    *force = (kbt_ / r * (d2rdf / rdf - drdf*drdf / rdf / rdf - drdf / r / rdf));
-    return kbt_ / rdf * drdf;
-  }
+			      const double rdf,
+			      const double drdf,
+			      const double d2rdf,
+			      double* force) const {
     
-			     
-
+    *force = (virial_scaling_ / r * (d2rdf / rdf - drdf*drdf / rdf / rdf - drdf / r / rdf));
+    return virial_scaling_ / rdf * drdf;
+  }
+  
+  
+  
   void Virial::compute_virial_grid_() const {
     //compute and write out pairwise force
     vector<double> x(1);
@@ -345,86 +383,169 @@ void Virial::setup_link_cells_(){
       der[0] = f;
       virial_grid_->setValueAndDerivatives(i, v, der);
     }
-
+    
   }
-
-void Virial::calculate()  {
-  setup_link_cells_();
-
-  //number of neighbors
-  unsigned int nn;
-  Vector rij;
-  double r, dx, gr;
-  Grid::index_t ineigh;
-  vector<double> rvec(1);
-  vector<Grid::index_t> grid_neighs;
-  vector<double> grid_der(1);
-  vector<double> grid_der2(1);
-  vector<double> temp(1);
-  vector<double> x(1);
   
-  dx = rdf_grid_->getDx()[0];
+  double Virial::do_calc_() {
+    
+    //number of neighbors
+    unsigned int nn;
+    Vector ri, rj, rij, force;
+    double r, dx, gr, virial = 0;
+    bool rdf_update = getStep() % rdf_stride_ == 0;
+    
+    Grid::index_t ineigh;
+    vector<Grid::index_t> grid_neighs;
+    
+    vector<double> rvec(1);
+    vector<double> grid_der(1);
+    vector<double> grid_der2(1);
+    vector<double> temp(1);
+    vector<double> x(1);
 
-  rdf_grid_->scaleAllValuesAndDerivatives(1 - smoothing_);
-  drdf_grid_->scaleAllValuesAndDerivatives(1 - smoothing_);
-  
-  for(unsigned int i = 0; i < group_1.size(); ++i) {
+    //we need this in case our CV is biased
+    //to propogate chain rule
+    double colvar_force = getPntrToComponent(0)->getForce() + getPntrToComponent(1)->getForce();
 
-    nn = 1;
-    neighs[0] = i;
-    linkcells.retrieveNeighboringAtoms( getPosition(group_1[i]), nn, neighs);
-    //start at 1 since the first is self
-    for(unsigned int j = 1; j < nn; ++j) {
-      //don't double count
-      if((!b_self_virial_ && neighs[j] < group_1.size()) ||
-	 (b_self_virial_ && neighs[j] < i))
-	continue;
-      rij = delta(getPosition(group_1[i]), getPosition(group_2[neighs[j]]));
-      r = rij.modulo();
-      rvec[0] = r;
-      
-      grid_neighs = rdf_grid_->getNeighbors(rvec, rdf_kernel_support_);
-      for(unsigned k = 0; k < grid_neighs.size();++k){
-	//get position of neighbor
-        ineigh = grid_neighs[k];
-        rdf_grid_->getPoint(ineigh,x);
-	
-	//eval the rdf and derivatives
-	gr = eval_rdf_(x[0], r, dx, grid_der, grid_der2);
-
-	//add them with smoothing factor (exp moving avg)
-	/*
-	log.printf("(%d, %d) -> r = %4.2g, x = %4.2g, gr = %4.2g, smooth = %4.2g, existing = %4.2g, samples =%d\n",
-		   group_1[i], group_2[neighs[j]],
-		   r, x[0], gr, smoothing_,
-		   rdf_grid_->getValueAndDerivatives(ineigh, temp) / smoothing_,
-		   rdf_samples_);*/
-
-	//exponential moving average
-	gr *= smoothing_;
-	grid_der[0] *= smoothing_;
-	grid_der2[0] *= smoothing_;
-	
-        rdf_grid_->addValueAndDerivatives(ineigh, gr, grid_der);
-	drdf_grid_->addValueAndDerivatives(ineigh, grid_der[0], grid_der2);
-      }
-      rdf_samples_++;
+    vector<Vector>& forces(modifyForces());
+    Tensor virial_tensor(modifyVirial());
+    
+    if(rdf_update) {
+      dx = rdf_grid_->getDx()[0];    
+      rdf_grid_->scaleAllValuesAndDerivatives(1 - smoothing_);
+      drdf_grid_->scaleAllValuesAndDerivatives(1 - smoothing_);
+      rdf_samples_ = 0;
     }
+    
+    
+    for(unsigned int i = 0; i < group_1.size(); ++i) {
+      
+      nn = 1;
+      neighs[0] = i;
+      ri = getPosition(group_1[i]);
+      linkcells.retrieveNeighboringAtoms( ri, nn, neighs);
+      //start at 1 since the first is self
+      for(unsigned int j = 1; j < nn; ++j) {
+	//don't double count
+	if((!b_self_virial_ && neighs[j] < group_1.size()) ||
+	   (b_self_virial_ && neighs[j] < i))
+	  continue;
+	rj = getPosition(group_2[neighs[j]]);
+	rij = delta(ri, rj);
+	r = rij.modulo();
+	rvec[0] = r;
+	
+	//get mean force radial component
+	gr = 1 / r * virial_grid_->getValueAndDerivatives(rvec, grid_der);
+	//add derivatives (see math)
+	//use der2 because it is convienent
+	force[0] = rij[0] * (gr -  rij[0] * rij[0] / r / r * grid_der[0]) + 
+	           rij[1] * (   -  rij[0] * rij[1] / r / r * grid_der[0]) + 
+	           rij[2] * (   -  rij[0] * rij[2] / r / r * grid_der[0]);
+
+	force[1] = rij[0] * (   -  rij[1] * rij[0] / r / r * grid_der[0]) + 
+	           rij[1] * (gr -  rij[1] * rij[1] / r / r * grid_der[0]) + 
+	           rij[2] * (   -  rij[1] * rij[1] / r / r * grid_der[0]);
+
+	force[2] = rij[0] * (   -  rij[2] * rij[0] / r / r * grid_der[0]) + 
+	           rij[1] * (   -  rij[2] * rij[1] / r / r * grid_der[0]) + 
+	           rij[2] * (gr -  rij[2] * rij[1] / r / r * grid_der[0]);
+
+	//add force and apply chain rule (multiplication)	
+	forces[group_1[i].index()] += force * colvar_force;
+
+	force[0] = -rij[0] * (gr -  rij[0] * rij[0] / r / r * grid_der[0]) + 
+	           -rij[1] * (   -  rij[0] * rij[1] / r / r * grid_der[0]) + 
+	           -rij[2] * (   -  rij[0] * rij[2] / r / r * grid_der[0]);
+
+	force[1] = -rij[0] * (   -  rij[1] * rij[0] / r / r * grid_der[0]) + 
+	           -rij[1] * (gr -  rij[1] * rij[1] / r / r * grid_der[0]) + 
+	           -rij[2] * (   -  rij[1] * rij[1] / r / r * grid_der[0]);
+
+	force[2] = -rij[0] * (   -  rij[2] * rij[0] / r / r * grid_der[0]) + 
+	           -rij[1] * (   -  rij[2] * rij[1] / r / r * grid_der[0]) + 
+	           -rij[2] * (gr -  rij[2] * rij[1] / r / r * grid_der[0]);
+
+	//add force and apply chain rule (multiplication)	
+	forces[group_2[neighs[j]].index()] += force * colvar_force;
+
+	//now add to virial tensor
+	for(unsigned int vi = 0; vi < 3; ++vi) {
+	  for(unsigned int vj = 0; vj < 3; ++vj) {
+	    //gr is negative of mean force, so subtract
+	    //use dx to store intermediate because it's defined
+	    dx = rij[vi] * rij[vj] * gr;
+	    virial_tensor(vi,vj) += dx;
+	    if(vi == vj)
+	      virial += dx;
+	  }
+	}
+	
+	if(rdf_update) {
+	  grid_neighs = rdf_grid_->getNeighbors(rvec, rdf_kernel_support_);
+	  for(unsigned k = 0; k < grid_neighs.size();++k){
+	    //get position of neighbor
+	    ineigh = grid_neighs[k];
+	    rdf_grid_->getPoint(ineigh,x);
+	    
+	    //eval the rdf and derivatives
+	    gr = eval_rdf_(x[0], r, dx, grid_der, grid_der2);
+	    
+	    //add them with smoothing factor (exp moving avg)
+	    //exponential moving average
+	    gr *= smoothing_;
+	    grid_der[0] *= smoothing_;
+	    grid_der2[0] *= smoothing_;
+	    
+	    rdf_grid_->addValueAndDerivatives(ineigh, gr, grid_der);
+	    drdf_grid_->addValueAndDerivatives(ineigh, grid_der[0], grid_der2);
+	  }
+	  rdf_samples_++;
+	}
+      }
+    }
+    
+    return virial;
+  }
+  
+  void Virial::write_grid_() {
+    
+    rdf_file_.rewind();
+    drdf_file_.rewind();
+    virial_file_.rewind();
+
+    rdf_grid_->writeToFile(rdf_file_);
+    drdf_grid_->writeToFile(drdf_file_);
+    virial_grid_->writeToFile(virial_file_);
+    
+  }
+  
+  void Virial::calculate()  {
+    
+    setup_link_cells_();
+    
+    double v = do_calc_();
+    getPntrToComponent("virial")->set(v);
+    //add ideal gas contribution
+    getPntrToComponent("pressure")->set(v + 3 * virial_scaling_ * (group_1.size() + group_2.size()));
+    
+    if(getStep() % rdf_stride_ == 0) {
+      //only changes when rdf is updated
+      compute_virial_grid_();	
+    }
+    //    if(getStep() % grid_w_stride_ == 0)
+    //      write_grid_();
+    
+  }
+  
+  void Virial::apply() {
+    //nothing. Handled in actionatomistic
   }
 
-  rdf_samples_ = 0;
-  setValue(0);
+  unsigned int Virial::getNumberOfDerivatives(){
+    //plus 9 for virial (?)
+    return 3*getNumberOfAtoms() + 9;
+  }
   
-  rdf_file_.rewind();
-  drdf_file_.rewind();
-  virial_file_.rewind();
-  compute_virial_grid_();
-  rdf_grid_->writeToFile(rdf_file_);
-  drdf_grid_->writeToFile(drdf_file_);
-  virial_grid_->writeToFile(virial_file_);
-
-}
-
-
 }
 }
