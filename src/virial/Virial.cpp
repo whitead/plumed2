@@ -375,8 +375,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 			      const double d2rdf,
 			      double* force) const {
     
-    *force = (virial_scaling_ / r * (d2rdf / rdf - drdf*drdf / rdf / rdf - drdf / r / rdf));
-    //positive because we take it for rij vector
+    *force = (virial_scaling_ / r * (d2rdf / rdf - drdf*drdf / rdf / rdf - drdf / r / rdf));    
     return virial_scaling_ / rdf * drdf;
   }
   
@@ -473,9 +472,11 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	      //get virial derivative and apply chain rule
 	      tmp = colvar_force * rij[vi] * (sr * (vi == vj) + rij[vi] * rij[vj] / r * grid_der[0]);
 	      force[vi] += tmp;
-	      virial_tensor(vi,vj) += tmp;
+	      //plumed/sim enges accumulate per atom distance at end so put force here
+	      virial_tensor(vi,vj) -= tmp;
+	      virial_tensor(vj,vi) += tmp;
 	      if(vi == vj) {
-		virial += rij[vi] * sr;
+		virial -= rij[vi] * sr;
 	      }
 	    }
 	  }
