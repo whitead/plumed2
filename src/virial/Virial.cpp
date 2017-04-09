@@ -49,8 +49,10 @@ Calculate ?
   private:
     //if we are computing self-virial
     bool b_self_virial_;
+    bool b_rdf_first_update_;
     double rdf_bw_;
-    double cutoff_;
+    double rdf_cutoff_;
+    double virial_cutoff_;
     double smoothing_;
     double pairwise_density_;    
     double temperature_;
@@ -149,11 +151,12 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     ActionAtomistic(ao),
     ActionWithValue(ao),
     b_self_virial_(false),
+    b_rdf_first_update_(true),
     rdf_bw_(0),
     temperature_(0),
     kbt_(1),
-    rdf_stride_(1),
-    grid_w_stride_(1),
+    rdf_stride_(250),
+    grid_w_stride_(1000),
     rdf_samples_(0),
     neighs(0),
     linkcells(comm),
@@ -166,7 +169,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     double time_const = 1;
     double vol = 0;
     
-    parse("CUTOFF", cutoff_);
+    parse("CUTOFF", virial_cutoff_);
     
     string funcl = getLabel() + ".gr";
     string dfuncl = getLabel() + ".dgr";
@@ -185,9 +188,9 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     parse("VOLUME", vol);
     parseFlag("RDF_SPLINE", b_spline);
     
-    log.printf("  Will compute RDF every %d steps\n", rdf_stride_);
+    log.printf("  will compute RDF every %d steps\n", rdf_stride_);
     if(grid_w_stride_ > 0)
-      log.printf("  Will write grids every %d steps\n", grid_w_stride_);
+      log.printf("  will write grids every %d steps\n", grid_w_stride_);
     
     if(temperature_ >= 0) kbt_ = plumed.getAtoms().getKBoltzmann() * temperature_;
     else kbt_ = plumed.getAtoms().getKbT();
@@ -198,12 +201,11 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
       log.printf("  Warning: Setting bandwidth to zero means no forces/virial will be calculated.\n"
 		 "  Only valid RDF will be output\n");
     }
-    
     if(time_const == 0) {
-      time_const = 1;
+      time_const = 5;
     }
     smoothing_ = 1.0 - exp(-1.0 / time_const);
-    log.printf("  Using exponential moving average with time constant %4.2f (smoothing = %4.2f)\n", time_const, smoothing_);
+    log.printf("  using exponential moving average with time constant %4.2f (smoothing = %4.2f)\n", time_const, smoothing_);
     
     vector<string> gnames;
     vector<bool> gpbc;
@@ -220,7 +222,11 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     virial_grid_ = new Grid(ffuncl, gnames, gmin, gmax, nbin, b_spline, true, true, gpbc, gnames, gnames);
     
     //rdf_kernel_support_.push_back(ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
-    rdf_kernel_support_.push_back(4 * ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
+    //3 -> gaussian stds
+    rdf_kernel_support_.push_back(3 * ceil(rdf_bw_ / rdf_grid_->getDx()[0]));
+    //we need to go a little bit farther to prevent edge effects in virial
+    rdf_cutoff_ = virial_cutoff_ + 3 * rdf_bw_;
+    
     
     
     parseAtomList("GROUP", all_atoms[0]);
@@ -234,12 +240,12 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
       b_self_virial_ = false;    
       group_1 = all_atoms[1];
       group_2 = all_atoms[2];
-      log.printf("  Computing virial between two groups\n");
+      log.printf("  computing virial between two groups\n");
     } else {
       b_self_virial_ = true;    
       group_1 = all_atoms[0];
       group_2 = all_atoms[0];
-      log.printf("  Computing self-virial\n");
+      log.printf("  computing self-virial\n");
     }
     
     //make neighbors big enough for all neighbors case
@@ -254,22 +260,22 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	log.printf("  Warning: Unable to determine box, so using cutoff for volume estimate.\n");
 	log.printf("    This will lead to an overestimation of density.\n");
 	log.printf("    Conisder setting volume (in plumed units) manually\n");
-	vol = 4. / 3 * pi * pow(cutoff_, 3);
-	log.printf("  Estimating volume...");    
+	vol = 4. / 3 * pi * pow(rdf_cutoff_, 3);
+	log.printf("  estimating volume...");    
       }
     }
-    log.printf("  Volume is %4.2f\n", vol);    
+    log.printf("  volume is %4.2f\n", vol);    
     //calculate pairwise density
     //divide by 2 since we don't double count
     pairwise_density_ = (group_1.size() * (group_2.size() - b_self_virial_)) / 2.0f / vol;
-    log.printf("  Setting pairwise density to %4.2f\n", pairwise_density_);
+    log.printf("  setting pairwise density to %4.2f\n", pairwise_density_);
     
     //compute virial scaling which is kT  /(3 V)
     virial_scaling_ = kbt_ / (3 * vol);
     
     
     
-    linkcells.setCutoff( cutoff_ );
+    linkcells.setCutoff( rdf_cutoff_ );
     
     addComponentWithDerivatives("virial");
     addComponentWithDerivatives("pressure");
@@ -396,7 +402,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     //number of neighbors
     unsigned int nn;
     Vector ri, rj, rij, force;
-    double r, dx, gr, virial = 0;
+    double r, dx, gr, tmp, virial = 0, smooth = smoothing_;
     bool rdf_update = getStep() % rdf_stride_ == 0;
     
     Grid::index_t ineigh;
@@ -411,6 +417,12 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     //we need this in case our CV is biased
     //to propogate chain rule
     double colvar_force = getPntrToComponent(0)->getForce() + getPntrToComponent(1)->getForce();
+
+    //check if we are on the first update
+    if(b_rdf_first_update_) {
+      smooth = 1.0;
+      b_rdf_first_update_ = false;
+    }
 
     vector<Vector>& forces(modifyForces());
     Tensor virial_tensor(modifyVirial());
@@ -438,58 +450,47 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	rj = getPosition(group_2[neighs[j]]);
 	rij = pbcDistance(ri, rj);
 	r = rij.modulo();
-	if(r >= cutoff_)
+	if(r >= rdf_cutoff_)
 	  continue;
 
 	rvec[0] = r;
 	
-	//get mean force radial component
-	gr = 1 / r * virial_grid_->getValueAndDerivatives(rvec, grid_der);
-	//add derivatives (see math)
-	//use der2 because it is convienent
-	force[0] = rij[0] * (gr -  rij[0] * rij[0] / r / r * grid_der[0]) + 
-	           rij[1] * (   -  rij[0] * rij[1] / r / r * grid_der[0]) + 
-	           rij[2] * (   -  rij[0] * rij[2] / r / r * grid_der[0]);
+	if(r < virial_cutoff_) {
+	  //only apply if particle is away from edge (rdf vs virial cutoff)
 
-	force[1] = rij[0] * (   -  rij[1] * rij[0] / r / r * grid_der[0]) + 
-	           rij[1] * (gr -  rij[1] * rij[1] / r / r * grid_der[0]) + 
-	           rij[2] * (   -  rij[1] * rij[1] / r / r * grid_der[0]);
+	  //get mean force radial component
+	  gr = 1 / r * virial_grid_->getValueAndDerivatives(rvec, grid_der);
+	  //add derivatives (see math)
+	  //use der2 because it is convienent
+	  force[0] = rij[0] * (gr -  rij[0] * rij[0] / r / r * grid_der[0]) + 
+	             rij[1] * (   -  rij[0] * rij[1] / r / r * grid_der[0]) + 
+	             rij[2] * (   -  rij[0] * rij[2] / r / r * grid_der[0]);
 
-	force[2] = rij[0] * (   -  rij[2] * rij[0] / r / r * grid_der[0]) + 
-	           rij[1] * (   -  rij[2] * rij[1] / r / r * grid_der[0]) + 
-	           rij[2] * (gr -  rij[2] * rij[1] / r / r * grid_der[0]);
+	  force[1] = rij[0] * (   -  rij[1] * rij[0] / r / r * grid_der[0]) + 
+	             rij[1] * (gr -  rij[1] * rij[1] / r / r * grid_der[0]) + 
+  	             rij[2] * (   -  rij[1] * rij[1] / r / r * grid_der[0]);
 
-	//add force and apply chain rule (multiplication)	
-	forces[group_1[i].index()] += force * colvar_force;
+	  force[2] = rij[0] * (   -  rij[2] * rij[0] / r / r * grid_der[0]) + 
+	             rij[1] * (   -  rij[2] * rij[1] / r / r * grid_der[0]) + 
+	             rij[2] * (gr -  rij[2] * rij[1] / r / r * grid_der[0]);
 
-	force[0] = -rij[0] * (gr -  rij[0] * rij[0] / r / r * grid_der[0]) + 
-	           -rij[1] * (   -  rij[0] * rij[1] / r / r * grid_der[0]) + 
-	           -rij[2] * (   -  rij[0] * rij[2] / r / r * grid_der[0]);
+	  //add force and apply chain rule (multiplication)	
+	  forces[group_1[i].index()] += force * colvar_force;
+	  forces[group_2[neighs[j]].index()] -= force * colvar_force;
 
-	force[1] = -rij[0] * (   -  rij[1] * rij[0] / r / r * grid_der[0]) + 
-	           -rij[1] * (gr -  rij[1] * rij[1] / r / r * grid_der[0]) + 
-	           -rij[2] * (   -  rij[1] * rij[1] / r / r * grid_der[0]);
-
-	force[2] = -rij[0] * (   -  rij[2] * rij[0] / r / r * grid_der[0]) + 
-	           -rij[1] * (   -  rij[2] * rij[1] / r / r * grid_der[0]) + 
-	           -rij[2] * (gr -  rij[2] * rij[1] / r / r * grid_der[0]);
-
-	//add force and apply chain rule (multiplication)	
-	forces[group_2[neighs[j]].index()] += force * colvar_force;
-
-	//now add to virial tensor
-	for(unsigned int vi = 0; vi < 3; ++vi) {
-	  for(unsigned int vj = 0; vj < 3; ++vj) {
-	    //gr is negative of mean force, so subtract
-	    //use dx to store intermediate because it's defined
-	    dx = rij[vi] * rij[vj] * gr;
-	    virial_tensor(vi,vj) += dx;
-	    if(vi == vj)
-	      virial += dx;
+	  //now add to virial tensor
+	  for(unsigned int vi = 0; vi < 3; ++vi) {
+	    for(unsigned int vj = 0; vj < 3; ++vj) {
+	      //gr is negative of mean force, so subtract
+	      tmp = rij[vi] * rij[vj] * gr;
+	      virial_tensor(vi,vj) += tmp;
+	      if(vi == vj)
+		virial += tmp;
+	    }
 	  }
 	}
-	
-	if(rdf_update) {
+
+	if(rdf_update) {	  
 	  grid_neighs = rdf_grid_->getNeighbors(rvec, rdf_kernel_support_);
 	  for(unsigned k = 0; k < grid_neighs.size();++k){
 	    //get position of neighbor
@@ -501,9 +502,9 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	    
 	    //add them with smoothing factor (exp moving avg)
 	    //exponential moving average
-	    gr *= smoothing_;
-	    grid_der[0] *= smoothing_;
-	    grid_der2[0] *= smoothing_;
+	    gr *= smooth;
+	    grid_der[0] *= smooth;
+	    grid_der2[0] *= smooth;
 	    
 	    rdf_grid_->addValueAndDerivatives(ineigh, gr, grid_der);
 	    drdf_grid_->addValueAndDerivatives(ineigh, grid_der[0], grid_der2);
