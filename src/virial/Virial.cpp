@@ -376,6 +376,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 			      double* force) const {
     
     *force = (virial_scaling_ / r * (d2rdf / rdf - drdf*drdf / rdf / rdf - drdf / r / rdf));
+    //positive because we take it for rij vector
     return virial_scaling_ / rdf * drdf;
   }
   
@@ -469,7 +470,8 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	  for(unsigned int vi = 0; vi < 3; ++vi) {
 	    force[vi] = 0;
 	    for(unsigned int vj = 0; vj < 3; ++vj) {
-	      tmp = colvar_force * rij[vi] * (sr * (vi == vj) - rij[vi] * rij[vj] / r * grid_der[0]);
+	      //get virial derivative and apply chain rule
+	      tmp = colvar_force * rij[vi] * (sr * (vi == vj) + rij[vi] * rij[vj] / r * grid_der[0]);
 	      force[vi] += tmp;
 	      virial_tensor(vi,vj) += tmp;
 	      if(vi == vj) {
@@ -478,9 +480,8 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	    }
 	  }
 
-	  //add force and apply chain rule (multiplication)	
-	  forces[group_1[i].index()] += force;
-	  forces[group_2[neighs[j]].index()] -= force;
+	  forces[group_1[i].index()] -= force;
+	  forces[group_2[neighs[j]].index()] += force;
 
 	}
 
