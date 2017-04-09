@@ -435,7 +435,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	   (b_self_virial_ && neighs[j] < i))
 	  continue;
 	rj = getPosition(group_2[neighs[j]]);
-	rij = delta(ri, rj);
+	rij = pbcDistance(ri, rj);
 	r = rij.modulo();
 	rvec[0] = r;
 	
