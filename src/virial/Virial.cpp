@@ -143,7 +143,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	     "in GROUPB. This must be used in conjuction with GROUPA.");
     
     keys.addOutputComponent("virial", "default", "The value of the virial collective variable (can be biased)");
-    keys.addOutputComponent("pressure", "default", "The pressure computed from the virial (can be biased)");
+    keys.addOutputComponent("pressure", "default", "The pressure computed from the virial (only available for within atom group virial)");
   }
   
   Virial::Virial(const ActionOptions&ao):
@@ -278,9 +278,12 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     linkcells.setCutoff( rdf_cutoff_ );
     
     addComponentWithDerivatives("virial");
-    addComponentWithDerivatives("pressure");
+    if(b_self_virial_){
+      addComponentWithDerivatives("pressure");
+      componentIsNotPeriodic("pressure");
+    }
+
     componentIsNotPeriodic("virial");
-    componentIsNotPeriodic("pressure");
     
     
     rdf_file_.link(*this);
@@ -402,7 +405,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     //number of neighbors
     unsigned int nn;
     Vector ri, rj, rij, force;
-    double r, dx, gr, tmp, virial = 0, smooth = smoothing_;
+    double r, dx, sr, gr, tmp, virial = 0, smooth = smoothing_;
     bool rdf_update = getStep() % rdf_stride_ == 0;
     
     Grid::index_t ineigh;
@@ -459,35 +462,26 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	  //only apply if particle is away from edge (rdf vs virial cutoff)
 
 	  //get mean force radial component
-	  gr = 1 / r * virial_grid_->getValueAndDerivatives(rvec, grid_der);
-	  //add derivatives (see math)
-	  //use der2 because it is convienent
-	  force[0] = rij[0] * (gr -  rij[0] * rij[0] / r / r * grid_der[0]) + 
-	             rij[1] * (   -  rij[0] * rij[1] / r / r * grid_der[0]) + 
-	             rij[2] * (   -  rij[0] * rij[2] / r / r * grid_der[0]);
+	  sr = 1 / r * virial_grid_->getValueAndDerivatives(rvec, grid_der);
 
-	  force[1] = rij[0] * (   -  rij[1] * rij[0] / r / r * grid_der[0]) + 
-	             rij[1] * (gr -  rij[1] * rij[1] / r / r * grid_der[0]) + 
-  	             rij[2] * (   -  rij[1] * rij[1] / r / r * grid_der[0]);
-
-	  force[2] = rij[0] * (   -  rij[2] * rij[0] / r / r * grid_der[0]) + 
-	             rij[1] * (   -  rij[2] * rij[1] / r / r * grid_der[0]) + 
-	             rij[2] * (gr -  rij[2] * rij[1] / r / r * grid_der[0]);
-
-	  //add force and apply chain rule (multiplication)	
-	  forces[group_1[i].index()] += force * colvar_force;
-	  forces[group_2[neighs[j]].index()] -= force * colvar_force;
-
-	  //now add to virial tensor
+	  //compute forces and virial term
+	  //and virial sum terms to my own virial
 	  for(unsigned int vi = 0; vi < 3; ++vi) {
+	    force[vi] = 0;
 	    for(unsigned int vj = 0; vj < 3; ++vj) {
-	      //gr is negative of mean force, so subtract
-	      tmp = rij[vi] * rij[vj] * gr;
+	      tmp = colvar_force * rij[vi] * (sr * (vi == vj) - rij[vi] * rij[vj] / r * grid_der[0]);
+	      force[vi] += tmp;
 	      virial_tensor(vi,vj) += tmp;
-	      if(vi == vj)
-		virial += tmp;
+	      if(vi == vj) {
+		virial += rij[vi] * sr;
+	      }
 	    }
 	  }
+
+	  //add force and apply chain rule (multiplication)	
+	  forces[group_1[i].index()] += force;
+	  forces[group_2[neighs[j]].index()] -= force;
+
 	}
 
 	if(rdf_update) {	  
@@ -536,7 +530,8 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     double v = do_calc_();
     getPntrToComponent("virial")->set(v);
     //add ideal gas contribution
-    getPntrToComponent("pressure")->set(v + 3 * virial_scaling_ * (group_1.size() + group_2.size()));
+    if(b_self_virial_)
+      getPntrToComponent("pressure")->set(v + 3 * virial_scaling_ * group_1.size());
     
     if(getStep() % rdf_stride_ == 0) {
       //only changes when rdf is updated
