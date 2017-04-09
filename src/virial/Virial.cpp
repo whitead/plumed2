@@ -185,14 +185,14 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     parse("VOLUME", vol);
     parseFlag("RDF_SPLINE", b_spline);
     
-    log.printf("  Will compute RDF every %d steps", rdf_stride_);
+    log.printf("  Will compute RDF every %d steps\n", rdf_stride_);
     if(grid_w_stride_ > 0)
-      log.printf("  Will write grids every %d steps", grid_w_stride_);
+      log.printf("  Will write grids every %d steps\n", grid_w_stride_);
     
     if(temperature_ >= 0) kbt_ = plumed.getAtoms().getKBoltzmann() * temperature_;
     else kbt_ = plumed.getAtoms().getKbT();
     
-    log.printf("  kBT taken to be %4.2f", kbt_);
+    log.printf("  kBT taken to be %4.2f\n", kbt_);
     
     if(rdf_bw_ == 0) {
       log.printf("  Warning: Setting bandwidth to zero means no forces/virial will be calculated.\n"
@@ -255,9 +255,10 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	log.printf("    This will lead to an overestimation of density.\n");
 	log.printf("    Conisder setting volume (in plumed units) manually\n");
 	vol = 4. / 3 * pi * pow(cutoff_, 3);
-	log.printf("  Estimating volume as %4.2f\n", vol);    
+	log.printf("  Estimating volume...");    
       }
     }
+    log.printf("  Volume is %4.2f\n", vol);    
     //calculate pairwise density
     //divide by 2 since we don't double count
     pairwise_density_ = (group_1.size() * (group_2.size() - b_self_virial_)) / 2.0f / vol;
@@ -437,6 +438,9 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	rj = getPosition(group_2[neighs[j]]);
 	rij = pbcDistance(ri, rj);
 	r = rij.modulo();
+	if(r >= cutoff_)
+	  continue;
+
 	rvec[0] = r;
 	
 	//get mean force radial component
