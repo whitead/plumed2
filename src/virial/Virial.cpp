@@ -476,7 +476,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	      virial_tensor(vi,vj) -= tmp;
 	      virial_tensor(vj,vi) += tmp;
 	      if(vi == vj) {
-		virial -= rij[vi] * sr;
+		virial += rij[vi] * sr;
 	      }
 	    }
 	  }

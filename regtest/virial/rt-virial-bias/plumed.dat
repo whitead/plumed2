@@ -1,4 +1,5 @@
 UNITS NATURAL
 VIRIAL GROUP=1-108 LABEL=virial CUTOFF=10 RDF_MIN=0 RDF_MAX=10 RDF_NBINS=500 TEMPERATURE=1.5 VOLUME=225 RDF_BW=0.15
 RESTRAINT ARG=virial.pressure AT=0.5 KAPPA=100 LABEL=res
-PRINT ARG=virial.virial,virial.pressure,res.bias STRIDE=1 
+PRINT ARG=virial.virial,virial.pressure,res.bias STRIDE=1  FILE=COLVAR
+
