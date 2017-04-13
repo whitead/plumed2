@@ -275,7 +275,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     pairwise_density_ = (group_1.size() * (group_2.size() - b_self_virial_)) / 2.0f / vol;
     log.printf("  setting pairwise density to %4.2f\n", pairwise_density_);
 
-    //compute virial scaling which is kT  /(3 V)
+    //compute virial scaling which is kT  /(V)
     virial_scaling_ = kbt_ / (3 * vol);
 
 
@@ -381,7 +381,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 			      double* force) const {
 
     *force = (virial_scaling_ / r * (d2rdf / rdf - drdf*drdf / rdf / rdf - drdf / r / rdf));
-    return virial_scaling_ / rdf * drdf;
+    return virial_scaling_ / rdf * drdf; 
   }
 
 
@@ -478,10 +478,12 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	      tmp = colvar_force * rij[vi] * (sr * (vi == vj) + rij[vi] * rij[vj] / r * grid_der[0]);
 	      force[vi] += tmp;
 	      //plumed/sim enges accumulate per atom distance at end so put force here
-	      virial_tensor(vi,vj) -= tmp;
-	      virial_tensor(vj,vi) += tmp;
+	      //virial_tensor(vi,vj) -= tmp;
+	      //virial_tensor(vj,vi) += tmp;
 	      if(vi == vj) {
-		virial += rij[vi] * r * sr;
+		// rij[vi] * r * sr;
+		virial += -rij[vi] * rij[vi] * sr;
+		//virial += rij[vi] * rij[vi] * / r * (-12 * 4  / pow(r,13) + 6 * 4 / pow(r, 7)) / 14 / 14 / 14 / 3; 		
 	      }
 	    }
 	  }
