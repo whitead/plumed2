@@ -96,6 +96,10 @@ void ActionAtomistic::changeBox( const Tensor& newbox ){
   pbc.setBox( newbox );
 }
 
+const Tensor& ActionAtomistic::getMDVirial() {
+  return atoms.getMDVirial();
+}
+
 void ActionAtomistic::calculateAtomicNumericalDerivatives( ActionWithValue* a, const unsigned& startnum ){
   if(!a){
     a=dynamic_cast<ActionWithValue*>(this);
@@ -281,5 +285,7 @@ void ActionAtomistic::makeWhole(){
     second=first+pbcDistance(first,second);
   }
 }
+
+
 
 }

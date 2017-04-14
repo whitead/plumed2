@@ -93,6 +93,8 @@ public:
   virtual void getCharges(const std::vector<int>&index,std::vector<double>&c)const=0;
 /// Retrieve local positions.
   virtual void getLocalPositions(std::vector<Vector>&p)const=0;
+/// Retrieve the virial in plumed units
+  virtual void getVirial(Tensor&v)const=0;
 /// Increment the virial by an amount v
   virtual void updateVirial(const Tensor&v)const=0;
 /// Increment the force on selected atoms.

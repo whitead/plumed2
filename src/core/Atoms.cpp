@@ -108,7 +108,6 @@ void Atoms::setCharges(void*p){
 void Atoms::setVirial(void*p){
   plumed_massert( dataCanBeSet ,"setVirial must be called after setStep in MD code interface");
   mdatoms->setVirial(p); virialHasBeenSet=true;
-  
 }
 
 void Atoms::setEnergy(void*p){
@@ -525,6 +524,12 @@ void Atoms::getLocalMDForces(std::vector<Vector>& localForces){
   for(unsigned i=0; i<gatindex.size(); i++) {
     localForces[i] = mdatoms->getMDforces(i);
   }
+}
+
+const Tensor& Atoms::getMDVirial() {
+  plumed_assert( virialHasBeenSet );  
+  mdatoms->getVirial(md_virial);
+  return md_virial;
 }
 
 }

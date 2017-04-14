@@ -55,6 +55,7 @@ class Atoms
   Tensor box;
   Pbc&   pbc;
   Tensor virial;
+  Tensor md_virial;
 // this is the energy set by each processor:
   double md_energy;
 // this is the summed energy:
@@ -163,6 +164,7 @@ public:
   void getLocalForces(std::vector<Vector>&);
   void getLocalMDForces(std::vector<Vector>&);
   const Tensor& getVirial()const;
+  const Tensor& getMDVirial();
 
   void setCollectEnergy(bool b){ collectEnergy=b; }
 

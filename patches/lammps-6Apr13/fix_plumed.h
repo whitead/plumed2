@@ -45,6 +45,8 @@ class FixPlumed : public Fix {
   double bias;
 // Compute for the energy
   class Compute *c_pe; 
+// Compute for the virial
+  class Compute *c_virial; 
 };
 
 };

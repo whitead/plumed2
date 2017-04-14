@@ -14,6 +14,8 @@
 #include "modify.h"
 #include "pair.h"
 
+#include <stdio.h>
+
 using namespace LAMMPS_NS;
 using namespace PLMD;
 using namespace FixConst;
@@ -146,6 +148,14 @@ FixPlumed::FixPlumed(LAMMPS *lmp, int narg, char **arg) :
   c_pe = modify->compute[ipe];
   // Trigger computation of potential energy every step
   c_pe->addstep(update->ntimestep+1);
+
+  //Define compute to calculate virial
+  char* id_virial = "__plumed__virial__";
+  char* virial_args[] = {id_virial, arg[1], "pressure", "NULL", "virial"};
+  modify->add_compute(5, virial_args);
+  int iv = modify->find_compute(id_virial);
+  c_virial = modify->compute[iv];
+  c_virial->addstep(update->ntimestep+1);
 }
 
 FixPlumed::~FixPlumed()
@@ -223,8 +233,21 @@ void FixPlumed::post_force(int vflag)
 
 
 // set up local virial/box. plumed uses full 3x3 matrices
+
+//get the current simulation engine virial
+  c_virial->compute_vector();
+  c_virial->invoked_flag |= 1;  
+  c_virial->addstep(update->ntimestep+1);
+  
   double virial[3][3];
-  for(int i=0;i<3;i++) for(int j=0;j<3;j++) virial[i][j]=0.0;
+  virial[0][0] = -c_virial->vector[0];
+  virial[1][1] = -c_virial->vector[1];
+  virial[2][2] = -c_virial->vector[2];
+  virial[0][1] = -c_virial->vector[3];
+  virial[0][2] = -c_virial->vector[4];
+  virial[1][2] = -c_virial->vector[5];
+
+
   double box[3][3];
   for(int i=0;i<3;i++) for(int j=0;j<3;j++) box[i][j]=0.0;
   box[0][0]=domain->h[0];

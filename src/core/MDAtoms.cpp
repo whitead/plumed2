@@ -69,6 +69,7 @@ public:
     return force/scalef;
   }
   void getBox(Tensor &)const;
+  void getVirial(Tensor &)const;
   void getPositions(const vector<int>&index,vector<Vector>&positions)const;
   void getPositions(unsigned j,unsigned k,vector<Vector>&positions)const;
   void getLocalPositions(std::vector<Vector>&p)const;
@@ -100,6 +101,12 @@ template <class T>
 void MDAtomsTyped<T>::getBox(Tensor&box)const{
   if(this->box) for(int i=0;i<3;i++)for(int j=0;j<3;j++) box(i,j)=this->box[3*i+j]*scaleb;
   else box.zero();
+}
+
+template <class T>
+void MDAtomsTyped<T>::getVirial(Tensor&virial)const{
+  if(this->virial) for(int i=0;i<3;i++)for(int j=0;j<3;j++) virial(i,j)=this->virial[3*i+j]/scalev;
+  else virial.zero();
 }
 
 template <class T>

@@ -108,6 +108,8 @@ public:
   std::vector<Vector> & modifyForces();
 /// Get a reference to virial array
   Tensor & modifyVirial();
+/// Get a const reference to the computed virial from the MD Engine
+  const Tensor& getMDVirial();
 /// Get a reference to force on energy
   double & modifyForceOnEnergy();
 /// Get number of available atoms
