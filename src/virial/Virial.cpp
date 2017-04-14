@@ -51,6 +51,7 @@ Calculate ?
     //if we are computing self-virial
     bool b_self_virial_;
     bool b_rdf_first_update_;
+    bool b_md_rescale_;
     double rdf_bw_;
     double rdf_cutoff_;
     double virial_cutoff_;
@@ -58,12 +59,18 @@ Calculate ?
     double pairwise_density_;
     double temperature_;
     double kbt_;
+    //this accounts for volume and kbT
     double virial_scaling_;
 
     unsigned int rdf_stride_;
     unsigned int grid_w_stride_;
     unsigned int rdf_samples_;
     unsigned int support_stddevs_;
+
+    //This will rescale virial to match MD engine
+    Tensor md_virial_rescaling_;
+    //my estimate of the virial
+    Tensor virial_estimate_;
 
     vector<unsigned int> rdf_kernel_support_;
     //atoms
@@ -97,7 +104,7 @@ Calculate ?
     void compute_virial_grid_() const;
 
     void write_grid_();
-    double do_calc_();
+    double do_calc_(bool b_rdf_update, bool b_forces);
 
   public:
     static void registerKeywords( Keywords& keys );
@@ -130,6 +137,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     keys.add("optional", "GRID_WRITE_STRIDE",
 	     "How often to write the RDF, its derivative, and pairwise virial grids."
 	     "Currently their names are fixed. ");
+    keys.addFlag("MD_RESCALE", true, "Whether or not to rescale the virial so that it matches the MD Engine. This will cause an error if retrieving the virial is not supported in the engine.");
     keys.addFlag("SPLINE", true, "Whether or not to use spline interpolation for computing grid quantities");
     keys.addFlag("MEAN_FIELD", false,
 		 "Instead of computing pairwise distances at each time step, "
@@ -142,8 +150,9 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     keys.add("atoms-2","GROUPB","Calculate the virial between all the atoms in GROUPA and all the atoms "
 	     "in GROUPB. This must be used in conjuction with GROUPA.");
 
-    keys.addOutputComponent("virial", "default", "The value of the virial collective variable (can be biased)");
-    keys.addOutputComponent("pressure", "default", "The pressure computed from the virial (only available for within atom group virial)");
+    keys.addOutputComponent("rawvirial", "default", "The virial without MD engine rescaling. Only available if MD_RESCALE flag is true. Cannot be biased.");
+    keys.addOutputComponent("virial", "default", "The value of the virial collective variable. Can be biased.");
+    keys.addOutputComponent("pressure", "default", "The pressure computed from the virial. Only available for within atom group virial. Can be biased");
   }
 
   Virial::Virial(const ActionOptions&ao):
@@ -154,7 +163,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     b_rdf_first_update_(true),
     rdf_bw_(0),
     temperature_(0),
-    kbt_(1),
+    kbt_(1),    
     rdf_stride_(250),
     grid_w_stride_(1000),
     rdf_samples_(0),
@@ -186,6 +195,7 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     parse("AVG_TIME_CONST", time_const);
     parse("VOLUME", vol);
     parseFlag("SPLINE", b_spline);
+    parseFlag("MD_RESCALE", b_md_rescale_);
 
     log.printf("  will compute RDF every %d steps\n", rdf_stride_);
     if(grid_w_stride_ > 0)
@@ -276,19 +286,25 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     log.printf("  setting pairwise density to %4.2f\n", pairwise_density_);
 
     //compute virial scaling which is kT  /(V)
-    virial_scaling_ = kbt_ / (3 * vol);
+    virial_scaling_ = kbt_ / vol;
+    for(unsigned int i = 0; i < 3; ++i)
+      for(unsigned int j = 0; j < 3; ++j)
+	md_virial_rescaling_(i,j) = 1;
 
 
 
     linkcells.setCutoff( rdf_cutoff_ );
 
     addComponentWithDerivatives("virial");
+    componentIsNotPeriodic("virial");
     if(b_self_virial_){
       addComponentWithDerivatives("pressure");
       componentIsNotPeriodic("pressure");
     }
-
-    componentIsNotPeriodic("virial");
+    if(b_md_rescale_) {
+      addComponent("rawvirial");
+      componentIsNotPeriodic("rawvirial");
+    }
 
 
     rdf_file_.link(*this);
@@ -394,6 +410,8 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     double v, f;
     for(Grid::index_t i = 0; i < virial_grid_->getSize(); ++i) {
       rdf_grid_->getPoint(i, x);
+      if(x[0] >= virial_cutoff_)
+	break;
       v = rdf_grid_->getValueAndDerivatives(i, der);
       drdf_grid_->getValueAndDerivatives(i, der2);
       //get virial and reuse  v
@@ -405,13 +423,13 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 
   }
 
-  double Virial::do_calc_() {
+  double Virial::do_calc_(bool b_rdf_update, bool b_forces) {
 
     //number of neighbors
     unsigned int nn;
     Vector ri, rj, rij, force;
     double r, dx, sr, gr, tmp, virial = 0, smooth = smoothing_;
-    bool rdf_update = getStep() % rdf_stride_ == 0;
+
 
     Grid::index_t ineigh;
     vector<Grid::index_t> grid_neighs;
@@ -424,18 +442,21 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 
     //we need this in case our CV is biased
     //to propogate chain rule
-    double colvar_force = getPntrToComponent(0)->getForce() + getPntrToComponent(1)->getForce();
+    double colvar_force = getPntrToComponent(0)->getForce();
+    if(b_self_virial_)
+      colvar_force += getPntrToComponent(1)->getForce();
 
     //check if we are on the first update
-    if(b_rdf_first_update_) {
+    if(b_rdf_update && b_rdf_first_update_) {
       smooth = 1.0;
       b_rdf_first_update_ = false;
     }
 
     vector<Vector>& forces(modifyForces());
-    Tensor virial_tensor(modifyVirial());
+    Tensor plm_virial_tensor(modifyGlobalVirial());
+    virial_estimate_.zero();
 
-    if(rdf_update) {
+    if(b_rdf_update) {
       dx = rdf_grid_->getDx()[0];
       rdf_grid_->scaleAllValuesAndDerivatives(1 - smoothing_);
       drdf_grid_->scaleAllValuesAndDerivatives(1 - smoothing_);
@@ -475,25 +496,24 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	    force[vi] = 0;
 	    for(unsigned int vj = 0; vj < 3; ++vj) {
 	      //get virial derivative and apply chain rule
-	      tmp = colvar_force * rij[vi] * (sr * (vi == vj) + rij[vi] * rij[vj] / r * grid_der[0]);
-	      force[vi] += tmp;
-	      //plumed/sim enges accumulate per atom distance at end so put force here
-	      //virial_tensor(vi,vj) -= tmp;
-	      //virial_tensor(vj,vi) += tmp;
-	      if(vi == vj) {
-		// rij[vi] * r * sr;
-		virial += -rij[vi] * rij[vi] * sr;
-		//virial += rij[vi] * rij[vi] * / r * (-12 * 4  / pow(r,13) + 6 * 4 / pow(r, 7)) / 14 / 14 / 14 / 3; 		
+	      if(b_forces) {
+		tmp = colvar_force * rij[vi] * (sr * (vi == vj) + rij[vi] * rij[vj] / r * grid_der[0]);
+		force[vi] += tmp * md_virial_rescaling_(vi, vj);
+		plm_virial_tensor(vi,vj) -= tmp * md_virial_rescaling_(vi, vj);
+		plm_virial_tensor(vj,vi) += tmp * md_virial_rescaling_(vj, vi);
 	      }
+	      virial_estimate_(vi, vj) += -rij[vi] * rij[vj] * sr;
+	      //virial += rij[vi] * rij[vi] * / r * (-12 * 4  / pow(r,13) + 6 * 4 / pow(r, 7)) / 14 / 14 / 14 / 3;
 	    }
 	  }
-
-	  forces[group_1[i].index()] -= force;
-	  forces[group_2[neighs[j]].index()] += force;
+	  if(b_forces) {
+	    forces[group_1[i].index()] -= force;
+	    forces[group_2[neighs[j]].index()] += force;
+	  }
 
 	}
 
-	if(rdf_update) {
+	if(b_rdf_update) {
 	  grid_neighs = rdf_grid_->getNeighbors(rvec, rdf_kernel_support_);
 	  for(unsigned k = 0; k < grid_neighs.size();++k){
 	    //get position of neighbor
@@ -517,6 +537,9 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
       }
     }
 
+    for(unsigned int i = 0; i < 3; ++i)
+      virial += virial_estimate_(i, i) / 3;
+
     return virial;
   }
 
@@ -535,17 +558,39 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
   void Virial::calculate()  {
 
     setup_link_cells_();
-
-    double v = do_calc_();
-    getPntrToComponent("virial")->set(v);
-    //add ideal gas contribution
-    if(b_self_virial_)
-      getPntrToComponent("pressure")->set(v + 3 * virial_scaling_ * group_1.size());
+    //need to know now, since this will be changed after calling do_calc_ the first time
+    bool b_first = b_rdf_first_update_;
+    //do calculation. Do not apply forces if we're going to rescale
+    double v = do_calc_(getStep() % rdf_stride_ == 0, !b_md_rescale_);
 
     if(getStep() % rdf_stride_ == 0) {
       //only changes when rdf is updated
       compute_virial_grid_();
     }
+
+    if(b_md_rescale_) {
+      getPntrToComponent("rawvirial")->set(v);    
+      //get rescaling so that my virial matches the MD Engine virial
+      if(!b_first) {
+	const Tensor& mdv = getMDVirial();
+	v = 0;
+	for(unsigned int i = 0; i < 3; ++i) {
+	  v += mdv(i, i) / 3.;	
+	  for(unsigned int j = 0; j < 3; ++j) {
+	    md_virial_rescaling_(i,j) = mdv(i,j) / virial_estimate_(i,j);
+	  }	
+	//now calculate forces again with the rescaling
+	do_calc_(false, true);      
+	}
+      }
+    } 
+
+    getPntrToComponent("virial")->set(v);    
+
+    //add ideal gas contribution
+    if(b_self_virial_)
+      getPntrToComponent("pressure")->set(v + 3 * virial_scaling_ * group_1.size());
+
     if(getStep() % grid_w_stride_ == 0)
       write_grid_();
 
