@@ -560,8 +560,8 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
     setup_link_cells_();
     //need to know now, since this will be changed after calling do_calc_ the first time
     bool b_first = b_rdf_first_update_;
-    //do calculation. Do not apply forces if we're going to rescale
-    double v = do_calc_(getStep() % rdf_stride_ == 0, !b_md_rescale_);
+    //do calculation. 
+    double v = do_calc_(getStep() % rdf_stride_ == 0, false);
 
     if(getStep() % rdf_stride_ == 0) {
       //only changes when rdf is updated
@@ -579,8 +579,6 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
 	  for(unsigned int j = 0; j < 3; ++j) {
 	    md_virial_rescaling_(i,j) = mdv(i,j) / virial_estimate_(i,j);
 	  }	
-	//now calculate forces again with the rescaling
-	do_calc_(false, true);      
 	}
       }
     } 
@@ -597,7 +595,10 @@ PLUMED_REGISTER_ACTION(Virial,"VIRIAL")
   }
 
   void Virial::apply() {
-    //nothing. Handled in actionatomistic
+    //now calculate forces
+    //need to do this here otherwise
+    //input forces won't be set 
+    do_calc_(false, true);          
   }
 
   unsigned int Virial::getNumberOfDerivatives(){
