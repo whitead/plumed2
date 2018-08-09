@@ -1,0 +1,6 @@
+type=driver
+mpiprocs=2
+plumed_modules=eds
+arg="--plumed plumed.dat --ixyz trajectory.xyz --multi 2"
+
+
